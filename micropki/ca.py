@@ -1,10 +1,7 @@
-"""
-Certificate Authority operations
-"""
 
 import os
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional, List
 from datetime import datetime, timezone
 import logging
 
@@ -14,13 +11,22 @@ from .crypto_utils import (
     generate_rsa_key_pair,
     generate_ecc_key_pair,
     save_encrypted_private_key,
+    save_unencrypted_private_key,
+    load_encrypted_private_key,
     save_certificate,
+    load_certificate,
 )
 from .certificates import (
     parse_subject_dn,
     create_self_signed_certificate,
+    create_intermediate_certificate,
+    create_leaf_certificate,
     get_certificate_info,
+    get_cn_from_subject,
+    parse_san_entries,
 )
+from .csr import create_csr
+from .templates import get_template, validate_san_for_template
 
 
 def initialize_root_ca(
@@ -32,268 +38,317 @@ def initialize_root_ca(
     validity_days: int,
     logger: logging.Logger
 ) -> None:
-    """
-    Initialize a root Certificate Authority.
-
-    Args:
-        subject_dn: Distinguished Name for the CA
-        key_type: 'rsa' or 'ecc'
-        key_size: Key size in bits (4096 for RSA, 384 for ECC)
-        passphrase: Passphrase for encrypting private key
-        out_dir: Output directory for PKI files
-        validity_days: Certificate validity period in days
-        logger: Logger instance
-
-    Raises:
-        ValueError: If parameters are invalid
-    """
+    """Инициализирует корневой CA (из Спринта 1)."""
     logger.info("=" * 60)
     logger.info("Starting Root CA initialization")
     logger.info("=" * 60)
 
-    # Validate parameters
     if key_type not in ('rsa', 'ecc'):
-        raise ValueError(f"Invalid key type: {key_type}. Must be 'rsa' or 'ecc'")
-
+        raise ValueError(f"Invalid key type: {key_type}")
     if key_type == 'rsa' and key_size != 4096:
         raise ValueError("RSA key size must be 4096 bits")
-
     if key_type == 'ecc' and key_size != 384:
-        raise ValueError("ECC key size must be 384 bits (P-384 curve)")
-
+        raise ValueError("ECC key size must be 384 bits (P-384)")
     if validity_days <= 0:
         raise ValueError("Validity days must be positive")
 
-    # Parse subject DN
-    logger.info(f"Parsing subject DN: {subject_dn}")
-    try:
-        subject = parse_subject_dn(subject_dn)
-        logger.info(f"Parsed subject: {subject.rfc4514_string()}")
-    except Exception as e:
-        logger.error(f"Failed to parse subject DN: {e}")
-        raise
+    subject = parse_subject_dn(subject_dn)
+    logger.info(f"Subject: {subject.rfc4514_string()}")
 
-    # Generate key pair
     logger.info(f"Generating {key_type.upper()} key pair ({key_size} bits)...")
-    try:
-        if key_type == 'rsa':
-            private_key = generate_rsa_key_pair(key_size)
-        else:  # ecc
-            private_key = generate_ecc_key_pair(key_size)
-        logger.info("Key pair generated successfully")
-    except Exception as e:
-        logger.error(f"Failed to generate key pair: {e}")
-        raise
+    if key_type == 'rsa':
+        private_key = generate_rsa_key_pair(key_size)
+    else:
+        private_key = generate_ecc_key_pair(key_size)
+    logger.info("Key pair generated successfully")
 
-    # Create self-signed certificate
     logger.info(f"Creating self-signed certificate (valid for {validity_days} days)...")
-    try:
-        certificate = create_self_signed_certificate(
-            private_key=private_key,
-            subject=subject,
-            validity_days=validity_days
-        )
-        logger.info("Certificate created successfully")
-    except Exception as e:
-        logger.error(f"Failed to create certificate: {e}")
-        raise
+    certificate = create_self_signed_certificate(private_key, subject, validity_days)
+    logger.info("Certificate created successfully")
 
-    # Create directory structure
+    # Создаём директории и сохраняем файлы
     private_dir = out_dir / 'private'
     certs_dir = out_dir / 'certs'
+    private_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    certs_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Creating directory structure in {out_dir}")
-    try:
-        private_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        certs_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Directories created successfully")
-    except Exception as e:
-        logger.error(f"Failed to create directories: {e}")
-        raise
-
-    # Save encrypted private key
     key_path = private_dir / 'ca.key.pem'
-    logger.info(f"Saving encrypted private key to {key_path}")
-    try:
-        save_encrypted_private_key(private_key, key_path, passphrase)
+    save_encrypted_private_key(private_key, key_path, passphrase)
+    logger.info(f"Private key saved: {key_path}")
 
-        # Verify permissions on Unix-like systems
-        if os.name != 'nt':  # Not Windows
-            stat_info = os.stat(key_path)
-            mode = stat_info.st_mode & 0o777
-            if mode != 0o600:
-                logger.warning(f"Key file permissions are {oct(mode)}, expected 0600")
-        else:
-            logger.warning("Running on Windows - file permission checks skipped")
+    if os.name == 'nt':
+        logger.warning("Running on Windows - file permission checks skipped")
 
-        logger.info("Private key saved successfully")
-    except Exception as e:
-        logger.error(f"Failed to save private key: {e}")
-        raise
-
-    # Save certificate
     cert_path = certs_dir / 'ca.cert.pem'
-    logger.info(f"Saving certificate to {cert_path}")
-    try:
-        save_certificate(certificate, cert_path)
-        logger.info("Certificate saved successfully")
-    except Exception as e:
-        logger.error(f"Failed to save certificate: {e}")
-        raise
+    save_certificate(certificate, cert_path)
+    logger.info(f"Certificate saved: {cert_path}")
 
-    # Generate policy file
+    # Policy file
     policy_path = out_dir / 'policy.txt'
-    logger.info(f"Generating certificate policy document: {policy_path}")
-    try:
-        cert_info = get_certificate_info(certificate)
-        create_policy_file(policy_path, cert_info, key_type, key_size)
-        logger.info("Policy document created successfully")
-    except Exception as e:
-        logger.error(f"Failed to create policy document: {e}")
-        raise
+    cert_info = get_certificate_info(certificate)
+    _create_policy_file(policy_path, cert_info, key_type, key_size)
+    logger.info(f"Policy document: {policy_path}")
 
-    # Log summary
     logger.info("=" * 60)
     logger.info("Root CA initialization completed successfully")
-    logger.info("=" * 60)
-    logger.info(f"Subject: {cert_info['subject']}")
-    logger.info(f"Serial Number: {cert_info['serial_number']}")
-    logger.info(f"Valid From: {cert_info['not_valid_before']}")
-    logger.info(f"Valid Until: {cert_info['not_valid_after']}")
-    logger.info(f"Key Algorithm: {cert_info['key_type']}-{cert_info['key_size']}")
-    logger.info(f"Signature Algorithm: {cert_info['signature_algorithm']}")
-    logger.info("=" * 60)
-    logger.info(f"Private Key: {key_path}")
-    logger.info(f"Certificate: {cert_path}")
-    logger.info(f"Policy: {policy_path}")
+    logger.info(f"Serial: {cert_info['serial_number']}")
     logger.info("=" * 60)
 
 
-def create_policy_file(
-    path: Path,
-    cert_info: dict,
+def issue_intermediate_ca(
+    root_cert_path: Path,
+    root_key_path: Path,
+    root_passphrase: bytes,
+    subject_dn: str,
     key_type: str,
-    key_size: int
+    key_size: int,
+    passphrase: bytes,
+    out_dir: Path,
+    validity_days: int,
+    path_length: int,
+    logger: logging.Logger
 ) -> None:
-    """
-    Create a Certificate Policy document.
 
-    Args:
-        path: Path where to save the policy file
-        cert_info: Certificate information dictionary
-        key_type: Key type (rsa/ecc)
-        key_size: Key size in bits
-    """
-    # Use timezone-aware datetime
-    policy_content = f"""
-================================================================================
-                    CERTIFICATE POLICY DOCUMENT
-                         MicroPKI Root CA
+    logger.info("=" * 60)
+    logger.info("Starting Intermediate CA creation")
+    logger.info("=" * 60)
+
+    # Валидация
+    if key_type == 'rsa' and key_size != 4096:
+        raise ValueError("RSA key size must be 4096")
+    if key_type == 'ecc' and key_size != 384:
+        raise ValueError("ECC key size must be 384")
+    if validity_days <= 0:
+        raise ValueError("Validity days must be positive")
+    if path_length < 0:
+        raise ValueError("Path length must be >= 0")
+
+    # 1. Загружаем корневой CA
+    logger.info(f"Loading root CA certificate: {root_cert_path}")
+    root_cert = load_certificate(root_cert_path)
+
+    logger.info("Loading root CA private key")
+    root_key = load_encrypted_private_key(root_key_path, root_passphrase)
+
+    # 2. Генерируем ключи промежуточного CA
+    subject = parse_subject_dn(subject_dn)
+    logger.info(f"Intermediate CA subject: {subject.rfc4514_string()}")
+
+    logger.info(f"Generating {key_type.upper()} key pair ({key_size} bits) for intermediate CA...")
+    if key_type == 'rsa':
+        intermediate_key = generate_rsa_key_pair(key_size)
+    else:
+        intermediate_key = generate_ecc_key_pair(key_size)
+    logger.info("Key pair generated")
+
+    # 3. Создаём CSR
+    logger.info("Creating CSR for intermediate CA...")
+    csr = create_csr(intermediate_key, subject, is_ca=True, path_length=path_length)
+    logger.info("CSR created")
+
+    # 4. Корневой CA подписывает CSR
+    logger.info(f"Signing intermediate CA certificate (valid for {validity_days} days, pathlen={path_length})...")
+    intermediate_cert = create_intermediate_certificate(
+        csr=csr,
+        root_key=root_key,
+        root_cert=root_cert,
+        validity_days=validity_days,
+        path_length=path_length
+    )
+    logger.info("Intermediate CA certificate signed by root CA")
+
+    # 5. Сохраняем
+    private_dir = out_dir / 'private'
+    certs_dir = out_dir / 'certs'
+    csrs_dir = out_dir / 'csrs'
+    private_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    certs_dir.mkdir(parents=True, exist_ok=True)
+    csrs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ключ
+    key_path = private_dir / 'intermediate.key.pem'
+    save_encrypted_private_key(intermediate_key, key_path, passphrase)
+    logger.info(f"Intermediate key saved: {key_path}")
+
+    # Сертификат
+    cert_path = certs_dir / 'intermediate.cert.pem'
+    save_certificate(intermediate_cert, cert_path)
+    logger.info(f"Intermediate certificate saved: {cert_path}")
+
+    # CSR (для справки)
+    from .csr import save_csr
+    csr_path = csrs_dir / 'intermediate.csr.pem'
+    save_csr(csr, csr_path)
+    logger.info(f"CSR saved: {csr_path}")
+
+    # Обновляем policy.txt
+    policy_path = out_dir / 'policy.txt'
+    cert_info = get_certificate_info(intermediate_cert)
+    _update_policy_with_intermediate(policy_path, cert_info, key_type, key_size, path_length)
+    logger.info("Policy document updated")
+
+    if os.name == 'nt':
+        logger.warning("Running on Windows - file permission checks skipped")
+
+    logger.info("=" * 60)
+    logger.info("Intermediate CA created successfully")
+    logger.info(f"Serial: {cert_info['serial_number']}")
+    logger.info(f"Issuer: {cert_info['issuer']}")
+    logger.info("=" * 60)
+
+
+def issue_certificate(
+    ca_cert_path: Path,
+    ca_key_path: Path,
+    ca_passphrase: bytes,
+    template_name: str,
+    subject_dn: str,
+    san_entries: List[str],
+    out_dir: Path,
+    validity_days: int,
+    key_type: str = 'rsa',
+    key_size: int = 2048,
+    logger: logging.Logger = None
+) -> None:
+
+    if logger is None:
+        import logging
+        logger = logging.getLogger('micropki')
+
+    logger.info("=" * 60)
+    logger.info(f"Issuing {template_name} certificate")
+    logger.info("=" * 60)
+
+    # Валидация шаблона и SAN
+    template = get_template(template_name)
+    validate_san_for_template(template, san_entries)
+    logger.info(f"Template: {template_name}")
+
+    # Загружаем CA
+    logger.info(f"Loading CA certificate: {ca_cert_path}")
+    ca_cert = load_certificate(ca_cert_path)
+
+    logger.info("Loading CA private key")
+    ca_key = load_encrypted_private_key(ca_key_path, ca_passphrase)
+
+    # Парсим subject
+    subject = parse_subject_dn(subject_dn)
+    cn = get_cn_from_subject(subject)
+    logger.info(f"Subject: {subject.rfc4514_string()}")
+
+    # Парсим SAN
+    san_extension = None
+    if san_entries:
+        san_extension = parse_san_entries(san_entries)
+        logger.info(f"SAN entries: {san_entries}")
+
+    # Генерируем ключи
+    logger.info(f"Generating {key_type.upper()}-{key_size} key pair for end entity...")
+    if key_type == 'rsa':
+        entity_key = generate_rsa_key_pair(key_size)
+    else:
+        entity_key = generate_ecc_key_pair(key_size)
+    logger.info("Key pair generated")
+
+    # Создаём сертификат
+    logger.info(f"Creating {template_name} certificate (valid for {validity_days} days)...")
+    certificate = create_leaf_certificate(
+        subject=subject,
+        public_key=entity_key.public_key(),
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        template_name=template_name,
+        validity_days=validity_days,
+        san_extension=san_extension
+    )
+    logger.info("Certificate created and signed")
+
+    # Определяем имена файлов
+    # Безопасное имя файла из CN
+    safe_cn = cn.replace(' ', '_').replace('*', 'wildcard')
+    safe_cn = ''.join(c for c in safe_cn if c.isalnum() or c in '._-')
+    if not safe_cn:
+        safe_cn = format(certificate.serial_number, 'x')[:16]
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    cert_path = out_path / f'{safe_cn}.cert.pem'
+    key_path = out_path / f'{safe_cn}.key.pem'
+
+    # Сохраняем сертификат
+    save_certificate(certificate, cert_path)
+    logger.info(f"Certificate saved: {cert_path}")
+
+    # Сохраняем ключ БЕЗ шифрования (для конечных сертификатов)
+    save_unencrypted_private_key(entity_key, key_path)
+    logger.warning(f"Private key saved WITHOUT encryption: {key_path}")
+    logger.warning("Consider protecting this key with appropriate access controls")
+
+    if os.name == 'nt':
+        logger.warning("Running on Windows - file permission checks skipped")
+
+    # Лог аудита
+    cert_info = get_certificate_info(certificate)
+    logger.info("=" * 60)
+    logger.info(f"Certificate issued successfully")
+    logger.info(f"Template: {template_name}")
+    logger.info(f"Subject: {cert_info['subject']}")
+    logger.info(f"Serial: {cert_info['serial_number']}")
+    logger.info(f"Issuer: {cert_info['issuer']}")
+    logger.info(f"Valid: {cert_info['not_valid_before']} to {cert_info['not_valid_after']}")
+    if san_entries:
+        logger.info(f"SAN: {', '.join(san_entries)}")
+    logger.info(f"Certificate: {cert_path}")
+    logger.info(f"Private Key: {key_path}")
+    logger.info("=" * 60)
+
+
+def _create_policy_file(path, cert_info, key_type, key_size):
+
+    content = f"""================================================================================
+                    CERTIFICATE POLICY DOCUMENT - MicroPKI
 ================================================================================
 
 Policy Version: 1.0
-Document Date: {datetime.now(timezone.utc).isoformat()}
+Created: {datetime.now(timezone.utc).isoformat()}
 
---------------------------------------------------------------------------------
-1. CERTIFICATE AUTHORITY INFORMATION
---------------------------------------------------------------------------------
+--- ROOT CA ---
+Subject DN:      {cert_info['subject']}
+Serial Number:   {cert_info['serial_number']}
+Not Before:      {cert_info['not_valid_before']}
+Not After:       {cert_info['not_valid_after']}
+Key Algorithm:   {key_type.upper()}-{key_size}
+Signature:       {cert_info['signature_algorithm']}
+Purpose:         Root of trust for MicroPKI (educational/demo only)
 
-CA Name (Subject DN):
-    {cert_info['subject']}
+--- SECURITY POLICY ---
+Min RSA key:     2048 bits
+Min ECC curve:   P-256
+Max validity:    Root=10y, Intermediate=5y, End-entity=1y
+Key storage:     Encrypted PKCS#8 (AES-256)
 
-Certificate Serial Number:
-    {cert_info['serial_number']}
-
-Validity Period:
-    Not Before: {cert_info['not_valid_before']}
-    Not After:  {cert_info['not_valid_after']}
-
-Public Key Algorithm:
-    Type: {key_type.upper()}
-    Size: {key_size} bits
-    {'Curve: NIST P-384 (secp384r1)' if key_type == 'ecc' else ''}
-
-Signature Algorithm:
-    {cert_info['signature_algorithm']}
-
---------------------------------------------------------------------------------
-2. PURPOSE AND SCOPE
---------------------------------------------------------------------------------
-
-This is a ROOT Certificate Authority created for the MicroPKI project.
-
-Purpose:
-    - Educational demonstration of PKI concepts
-    - Root of trust for the MicroPKI certificate hierarchy
-    - Signing intermediate CAs and issuing certificates
-
-Scope:
-    - This CA is intended for DEMONSTRATION and EDUCATIONAL purposes only
-    - NOT for production use
-    - NOT for securing real-world applications
-
---------------------------------------------------------------------------------
-3. KEY USAGE
---------------------------------------------------------------------------------
-
-The CA certificate is authorized for:
-    - Certificate Signing (keyCertSign)
-    - CRL Signing (cRLSign)
-    - Digital Signature
-
-Basic Constraints:
-    - CA: TRUE
-    - Path Length: None (unlimited)
-
---------------------------------------------------------------------------------
-4. SECURITY POLICY
---------------------------------------------------------------------------------
-
-Private Key Protection:
-    - Stored encrypted using AES-256-CBC with PBKDF2
-    - Passphrase-protected
-    - File permissions: 0600 (owner read/write only)
-
-Key Generation:
-    - Generated using cryptographically secure random number generator
-    - Complies with NIST recommendations for key sizes
-
-Certificate Issuance:
-    - Minimum RSA key size: 2048 bits (recommended: 4096)
-    - Minimum ECC curve: P-256 (recommended: P-384)
-    - Maximum validity period:
-        * Root CA: 10 years
-        * Intermediate CA: 5 years
-        * End-entity: 1 year
-
-Revocation:
-    - CRL (Certificate Revocation List) support
-    - OCSP (Online Certificate Status Protocol) planned
-    - Regular CRL updates required
-
---------------------------------------------------------------------------------
-5. OPERATIONAL CONTACTS
---------------------------------------------------------------------------------
-
-This is a demonstration CA. For the purposes of this project:
-    - Technical Contact: [Your Name/Email]
-    - Security Contact: [Your Name/Email]
-
---------------------------------------------------------------------------------
-6. LEGAL DISCLAIMER
---------------------------------------------------------------------------------
-
-This Certificate Authority and its certificates are provided for EDUCATIONAL
-PURPOSES ONLY. The issuer makes no warranties regarding the security,
-reliability, or fitness for any purpose of this CA or any certificates issued
-by it.
-
-DO NOT USE IN PRODUCTION ENVIRONMENTS.
-
+DO NOT USE IN PRODUCTION.
 ================================================================================
-                            END OF POLICY DOCUMENT
-================================================================================
-""".strip()
-
+"""
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(policy_content)
+        f.write(content)
+
+
+def _update_policy_with_intermediate(path, cert_info, key_type, key_size, path_length):
+
+    addition = f"""
+--- INTERMEDIATE CA ---
+Subject DN:      {cert_info['subject']}
+Serial Number:   {cert_info['serial_number']}
+Not Before:      {cert_info['not_valid_before']}
+Not After:       {cert_info['not_valid_after']}
+Key Algorithm:   {key_type.upper()}-{key_size}
+Signature:       {cert_info['signature_algorithm']}
+Issuer DN:       {cert_info['issuer']}
+Path Length:     {path_length}
+Purpose:         Issuing CA for end-entity certificates
+================================================================================
+"""
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(addition)

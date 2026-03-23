@@ -1,0 +1,36 @@
+================================================================================
+                    CERTIFICATE POLICY DOCUMENT - MicroPKI
+================================================================================
+
+Policy Version: 1.0
+Created: 2026-03-16T14:27:57.171217+00:00
+
+--- ROOT CA ---
+Subject DN:      CN=Root CA
+Serial Number:   529F09B6AEBBEA2E1F1FE180819784191D62DF23
+Not Before:      2026-03-16T14:27:57+00:00
+Not After:       2036-03-13T14:27:57+00:00
+Key Algorithm:   RSA-4096
+Signature:       sha256WithRSAEncryption
+Purpose:         Root of trust for MicroPKI (educational/demo only)
+
+--- SECURITY POLICY ---
+Min RSA key:     2048 bits
+Min ECC curve:   P-256
+Max validity:    Root=10y, Intermediate=5y, End-entity=1y
+Key storage:     Encrypted PKCS#8 (AES-256)
+
+DO NOT USE IN PRODUCTION.
+================================================================================
+
+--- INTERMEDIATE CA ---
+Subject DN:      CN=Intermediate CA
+Serial Number:   61DBC89F53169B1D6925750EE640A5F644AF00E7
+Not Before:      2026-03-16T14:28:58+00:00
+Not After:       2031-03-15T14:28:58+00:00
+Key Algorithm:   RSA-4096
+Signature:       sha256WithRSAEncryption
+Issuer DN:       CN=Root CA
+Path Length:     0
+Purpose:         Issuing CA for end-entity certificates
+================================================================================
