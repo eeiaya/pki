@@ -1,11 +1,8 @@
 
-
-import os
 import secrets
 import ipaddress
 from datetime import datetime, timedelta, timezone
 from typing import Union, Optional, List
-from pathlib import Path
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
@@ -14,13 +11,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
 
 from .crypto_utils import compute_ski
+from .serial import generate_serial_number  # Импортируем из serial.py
 
 
 def parse_subject_dn(dn_string: str) -> x509.Name:
-    """
-    Парсит строку Distinguished Name в объект x509.Name.
-    Поддерживает /CN=.../O=... и CN=...,O=...
-    """
+
     if not dn_string or not dn_string.strip():
         raise ValueError("DN string cannot be empty")
 
@@ -44,7 +39,7 @@ def parse_subject_dn(dn_string: str) -> x509.Name:
     attributes = []
     for part in parts:
         if '=' not in part:
-            raise ValueError(f"Invalid DN component: {part}")
+            raise ValueError(f"Invalid DN component: '{part}'. Expected KEY=VALUE")
 
         key, value = part.split('=', 1)
         key = key.strip().upper()
@@ -64,19 +59,8 @@ def parse_subject_dn(dn_string: str) -> x509.Name:
     return x509.Name(attributes)
 
 
-def generate_serial_number() -> int:
-    """Генерирует случайный серийный номер (160 бит)."""
-    random_bytes = secrets.token_bytes(20)
-    serial = int.from_bytes(random_bytes, byteorder='big')
-    serial = serial & ((1 << 159) - 1)
-    return serial
-
-
 def parse_san_entries(san_strings: List[str]) -> x509.SubjectAlternativeName:
-    """
-    Парсит список SAN строк вида "dns:example.com", "ip:1.2.3.4".
-    Возвращает расширение SubjectAlternativeName.
-    """
+
     names = []
 
     for entry in san_strings:
@@ -109,7 +93,7 @@ def parse_san_entries(san_strings: List[str]) -> x509.SubjectAlternativeName:
 
 
 def _get_hash_algorithm(signing_key):
-    """Определяет алгоритм хеширования по типу ключа."""
+
     if isinstance(signing_key, rsa.RSAPrivateKey):
         return hashes.SHA256()
     elif isinstance(signing_key, ec.EllipticCurvePrivateKey):
@@ -123,7 +107,7 @@ def create_self_signed_certificate(
     subject: x509.Name,
     validity_days: int
 ) -> x509.Certificate:
-    """Создаёт самоподписанный сертификат корневого CA."""
+
     hash_algorithm = _get_hash_algorithm(private_key)
     serial = generate_serial_number()
     not_valid_before = datetime.now(timezone.utc)
@@ -189,38 +173,30 @@ def create_intermediate_certificate(
     validity_days: int,
     path_length: int = 0
 ) -> x509.Certificate:
-    """
-    Создаёт сертификат промежуточного CA.
-    Подписывается ключом корневого CA.
-    """
+
     hash_algorithm = _get_hash_algorithm(root_key)
     serial = generate_serial_number()
     not_valid_before = datetime.now(timezone.utc)
     not_valid_after = not_valid_before + timedelta(days=validity_days)
 
-    # SKI промежуточного CA (из его публичного ключа)
     intermediate_ski = compute_ski(csr.public_key())
-
-    # AKI - идентификатор ключа корневого CA
     root_ski = root_cert.extensions.get_extension_for_class(
         x509.SubjectKeyIdentifier
     ).value.digest
 
     builder = x509.CertificateBuilder()
     builder = builder.subject_name(csr.subject)
-    builder = builder.issuer_name(root_cert.subject)  # Издатель = корневой CA
+    builder = builder.issuer_name(root_cert.subject)
     builder = builder.public_key(csr.public_key())
     builder = builder.serial_number(serial)
     builder = builder.not_valid_before(not_valid_before)
     builder = builder.not_valid_after(not_valid_after)
 
-    # Basic Constraints: CA=TRUE с ограничением пути
     builder = builder.add_extension(
         x509.BasicConstraints(ca=True, path_length=path_length),
         critical=True
     )
 
-    # Key Usage для CA
     builder = builder.add_extension(
         x509.KeyUsage(
             digital_signature=True,
@@ -236,13 +212,11 @@ def create_intermediate_certificate(
         critical=True
     )
 
-    # SKI промежуточного
     builder = builder.add_extension(
         x509.SubjectKeyIdentifier(intermediate_ski),
         critical=False
     )
 
-    # AKI указывает на корневой CA
     builder = builder.add_extension(
         x509.AuthorityKeyIdentifier(
             key_identifier=root_ski,
@@ -252,7 +226,6 @@ def create_intermediate_certificate(
         critical=False
     )
 
-    # Подписываем ключом корневого CA
     certificate = builder.sign(root_key, hash_algorithm, default_backend())
     return certificate
 
@@ -266,10 +239,7 @@ def create_leaf_certificate(
     validity_days: int,
     san_extension: Optional[x509.SubjectAlternativeName] = None
 ) -> x509.Certificate:
-    """
-    Создаёт конечный сертификат (server/client/code_signing).
-    Подписывается ключом промежуточного CA.
-    """
+
     from .templates import get_template
 
     template = get_template(template_name)
@@ -278,10 +248,7 @@ def create_leaf_certificate(
     not_valid_before = datetime.now(timezone.utc)
     not_valid_after = not_valid_before + timedelta(days=validity_days)
 
-    # SKI конечного сертификата
     leaf_ski = compute_ski(public_key)
-
-    # AKI - из сертификата CA
     ca_ski = ca_cert.extensions.get_extension_for_class(
         x509.SubjectKeyIdentifier
     ).value.digest
@@ -294,15 +261,12 @@ def create_leaf_certificate(
     builder = builder.not_valid_before(not_valid_before)
     builder = builder.not_valid_after(not_valid_after)
 
-    # Basic Constraints: CA=FALSE (это НЕ CA)
     builder = builder.add_extension(
         x509.BasicConstraints(ca=False, path_length=None),
         critical=True
     )
 
-    # Key Usage зависит от шаблона и типа ключа
     is_rsa = isinstance(public_key, rsa.RSAPublicKey)
-    # Для серверного RSA добавляем keyEncipherment
     use_key_encipherment = template.key_encipherment and is_rsa
 
     builder = builder.add_extension(
@@ -320,7 +284,6 @@ def create_leaf_certificate(
         critical=True
     )
 
-    # Extended Key Usage
     eku_map = {
         "serverAuth": ExtendedKeyUsageOID.SERVER_AUTH,
         "clientAuth": ExtendedKeyUsageOID.CLIENT_AUTH,
@@ -332,17 +295,14 @@ def create_leaf_certificate(
         critical=False
     )
 
-    # SAN (Subject Alternative Name)
     if san_extension:
         builder = builder.add_extension(san_extension, critical=False)
 
-    # SKI
     builder = builder.add_extension(
         x509.SubjectKeyIdentifier(leaf_ski),
         critical=False
     )
 
-    # AKI
     builder = builder.add_extension(
         x509.AuthorityKeyIdentifier(
             key_identifier=ca_ski,
@@ -357,7 +317,7 @@ def create_leaf_certificate(
 
 
 def get_certificate_info(cert: x509.Certificate) -> dict:
-    """Извлекает информацию из сертификата."""
+
     public_key = cert.public_key()
     if isinstance(public_key, rsa.RSAPublicKey):
         key_type = "RSA"
@@ -382,7 +342,7 @@ def get_certificate_info(cert: x509.Certificate) -> dict:
 
 
 def get_cn_from_subject(subject: x509.Name) -> str:
-    """Извлекает Common Name из DN."""
+
     for attr in subject:
         if attr.oid == NameOID.COMMON_NAME:
             return attr.value

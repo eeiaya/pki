@@ -3,13 +3,13 @@
 ================================================================================
 
 Policy Version: 1.0
-Created: 2026-03-16T14:27:57.171217+00:00
+Created: 2026-03-25T11:41:38.479284+00:00
 
 --- ROOT CA ---
-Subject DN:      CN=Root CA
-Serial Number:   529F09B6AEBBEA2E1F1FE180819784191D62DF23
-Not Before:      2026-03-16T14:27:57+00:00
-Not After:       2036-03-13T14:27:57+00:00
+Subject DN:      CN=root ca
+Serial Number:   69C3C9F23291A20E
+Not Before:      2026-03-25T11:41:38+00:00
+Not After:       2036-03-22T11:41:38+00:00
 Key Algorithm:   RSA-4096
 Signature:       sha256WithRSAEncryption
 Purpose:         Root of trust for MicroPKI (educational/demo only)
@@ -24,13 +24,13 @@ DO NOT USE IN PRODUCTION.
 ================================================================================
 
 --- INTERMEDIATE CA ---
-Subject DN:      CN=Intermediate CA
-Serial Number:   61DBC89F53169B1D6925750EE640A5F644AF00E7
-Not Before:      2026-03-16T14:28:58+00:00
-Not After:       2031-03-15T14:28:58+00:00
+Subject DN:      CN=intermediate ca
+Serial Number:   69C3CA1D53F85FB1
+Not Before:      2026-03-25T11:42:21+00:00
+Not After:       2031-03-24T11:42:21+00:00
 Key Algorithm:   RSA-4096
 Signature:       sha256WithRSAEncryption
-Issuer DN:       CN=Root CA
+Issuer DN:       CN=root ca
 Path Length:     0
 Purpose:         Issuing CA for end-entity certificates
 ================================================================================

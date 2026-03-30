@@ -2,9 +2,12 @@
 Минималистичный инструмент для создания инфраструктуры открытых ключей (PKI) в учебных целях.
 
 ## Зависимости
-Python 3.10+
-OpenSSL
-cryptography >= 41.0.0
+- Python 3.10+
+- OpenSSL
+- cryptography >= 41.0.0
+- fastapi >= 0.104.0
+- uvicorn >= 0.24.0
+- pydantic >= 2.0.0
 ## Установка
 ```bash
 # Клонируйте репозиторий
@@ -100,6 +103,155 @@ micropki ca issue-cert \
     --subject "CN=MicroPKI Code Signer" \
     --out-dir pki/pki1/certs
 ```
+## Спринт 3: База данных и репозиторий
+### Инициализация базы данных
+
+```
+micropki db init --db-path pki/pki1/certificates.db
+```
+При выпуске сертификатов они автоматически сохраняются в базу данных.
+Дополнительные флаги не требуются.
+### Просмотр списка сертификатов
+```
+# Таблица (по умолчанию)
+micropki ca list-certs
+
+# Фильтр по статусу
+micropki ca list-certs --status valid
+
+# Вывод в JSON
+micropki ca list-certs --format json
+
+# Вывод в CSV
+micropki ca list-certs --format csv
+```
+Пример вывода:
+```
+===============================================================================================================
+CERTIFICATES (5 found)
+===============================================================================================================
+Serial                                     Subject                             Status     Template        Expires
+---------------------------------------------------------------------------------------------------------------
+69C3CA912F77F1EB                           CN=code signer                      valid      code_signing    2027-03-25
+69C3CA8B88E3AB72                           CN=alice                            valid      client          2027-03-25
+69C3CA85206B8F4A                           CN=example.com                      valid      server          2027-03-25
+69C3CA7C2A4E5D91                           CN=intermediate ca                  valid      intermediate_ca 2031-03-24
+69C3CA6E4B1A3F28                           CN=root ca                          valid      root_ca         2036-03-23
+===============================================================================================================
+```
+### Просмотр конкретного сертификата 
+```
+# По серийному номеру (таблица)
+micropki ca show-cert 69C3CA912F77F1EB
+
+# Вывод PEM
+micropki ca show-cert 69C3CA912F77F1EB --format pem
+```
+Пример вывода:
+```
+======================================================================
+CERTIFICATE DETAILS
+======================================================================
+Serial Number:   69C3CA912F77F1EB
+Subject:         CN=code signer
+Issuer:          CN=intermediate ca
+Not Before:      2026-03-25T11:44:17+00:00
+Not After:       2027-03-25T11:44:17+00:00
+Status:          valid
+Template:        code_signing
+Created At:      2026-03-25T11:44:17.310524+00:00
+======================================================================
+```
+### Экспорт сертификата из базы данных
+```
+micropki db export 69C3CA912F77F1EB -o exported_cert.pem
+```
+### Статистика базы данных
+```
+micropki db stats
+```
+Пример вывода:
+```
+==================================================
+DATABASE STATISTICS
+==================================================
+Total Certificates: 5
+
+By Status:
+  valid           5
+
+By Template:
+  root_ca         1
+  intermediate_ca 1
+  server          1
+  client          1
+  code_signing    1
+==================================================
+```
+### Запуск HTTP-сервера репозитория
+```
+micropki repo serve --host 127.0.0.1 --port 8080
+```
+Пример вывода:
+```
+============================================================
+Starting MicroPKI Certificate Repository Server
+============================================================
+Host:            127.0.0.1
+Port:            8080
+Database:        pki/pki1/certificates.db
+CA Certificates: pki/pki1/certs
+------------------------------------------------------------
+API Base URL:    http://127.0.0.1:8080
+API Docs:        http://127.0.0.1:8080/docs
+------------------------------------------------------------
+Press Ctrl+C to stop.
+============================================================
+```
+### Примеры API-запросов (curl)
+```
+# Получить сертификат по серийному номеру
+curl http://localhost:8080/certificate/69C3CA912F77F1EB
+
+# Скачать сертификат в PEM
+curl http://localhost:8080/certificate/69C3CA912F77F1EB/pem --output cert.pem
+
+# Список всех сертификатов
+curl http://localhost:8080/certificates
+
+# Фильтрация по статусу
+curl "http://localhost:8080/certificates?status=valid"
+
+# Фильтрация по шаблону
+curl "http://localhost:8080/certificates?template=server"
+
+# Получить корневой сертификат CA
+curl http://localhost:8080/ca/root --output root-ca.pem
+
+# Получить промежуточный сертификат CA
+curl http://localhost:8080/ca/intermediate --output intermediate-ca.pem
+
+# Статистика
+curl http://localhost:8080/statistics
+
+# Поиск по субъекту
+curl "http://localhost:8080/search?q=example.com"
+
+# Точка распространения CRL (заглушка)
+curl http://localhost:8080/crl
+# Ответ: 501 Not Implemented
+```
+### Интерактивная документация API (Swagger UI)
+После запуска сервера откройте в браузере:
+```
+http://127.0.0.1:8080/docs
+```
+Swagger UI позволяет:
+
+- Просматривать все эндпоинты API
+- Тестировать запросы прямо в браузере
+- Скачивать сертификаты
+
 ## Тестирование
 ### Модульные тесты
 ```
@@ -234,43 +386,139 @@ micropki ca issue-cert \
     --san email:test@test.com
 # Результат: Error: SAN type 'email' is not allowed for template 'server'
 ```
+### TEST-8: Вставка в базу данных и получение через CLI
+```
+# Выпуск 5 сертификатов (автоматически сохраняются в БД)
+micropki ca init --subject "CN=Root CA" --passphrase-file secrets/ca.pass
+micropki ca issue-intermediate --root-cert pki/pki1/certs/ca.cert.pem \
+    --root-key pki/pki1/private/ca.key.pem --root-pass-file secrets/ca.pass \
+    --subject "CN=Intermediate CA" --passphrase-file secrets/ca.pass
+micropki ca issue-cert --ca-cert pki/pki1/certs/intermediate.cert.pem \
+    --ca-key pki/pki1/private/intermediate.key.pem --ca-pass-file secrets/ca.pass \
+    --template server --subject "CN=example.com" --san dns:example.com
+micropki ca issue-cert --ca-cert pki/pki1/certs/intermediate.cert.pem \
+    --ca-key pki/pki1/private/intermediate.key.pem --ca-pass-file secrets/ca.pass \
+    --template client --subject "CN=Alice" --san email:alice@example.com
+micropki ca issue-cert --ca-cert pki/pki1/certs/intermediate.cert.pem \
+    --ca-key pki/pki1/private/intermediate.key.pem --ca-pass-file secrets/ca.pass \
+    --template code_signing --subject "CN=Code Signer"
+
+# Проверка: в БД должно быть 5 сертификатов
+micropki db stats
+# Total Certificates: 5
+
+# Получение через CLI
+micropki ca list-certs --status valid
+micropki ca show-cert <serial>
+```
+### TEST-9: API репозитория — получение сертификата
+```
+# Запустить сервер (в отдельном терминале)
+micropki repo serve --port 8080
+
+# Получить сертификат по серийному номеру
+curl http://localhost:8080/certificate/69C3CA912F77F1EB
+
+# Скачать PEM и сравнить с файлом
+curl http://localhost:8080/certificate/69C3CA912F77F1EB/pem --output api_cert.pem
+diff api_cert.pem pki/pki1/certs/code_signer.cert.pem
+# Ожидаемый результат: файлы идентичны
+```
+### TEST-10: API репозитория — получение CA сертификатов
+```
+curl http://localhost:8080/ca/root --output api_root.pem
+diff api_root.pem pki/pki1/certs/ca.cert.pem
+# Ожидаемый результат: файлы идентичны
+
+curl http://localhost:8080/ca/intermediate --output api_intermediate.pem
+diff api_intermediate.pem pki/pki1/certs/intermediate.cert.pem
+# Ожидаемый результат: файлы идентичны
+```
+### TEST-11: Невалидный серийный номер — 400 Bad Request
+```
+curl http://localhost:8080/certificate/INVALID_XYZ
+# Ожидаемый результат: 400 Bad Request
+
+curl http://localhost:8080/certificate/12G45
+# Ожидаемый результат: 400 Bad Request
+```
+### TEST-12: CRL заглушка — 501 Not Implemented
+```
+curl http://localhost:8080/crl
+# Ожидаемый результат: 501 Not Implemented
+# Тело ответа: "CRL generation not yet implemented. See Sprint 4."
+```
 ## Структура выходных файлов
 ```text
 
 pki/pki1/
 ├── private/
-│   ├── ca.key.pem              # зашифрованный ключ корневого CA (PKCS#8)
-│   └── intermediate.key.pem    # зашифрованный ключ промежуточного CA
+│   ├── ca.key.pem                  # зашифрованный ключ корневого CA
+│   └── intermediate.key.pem        # зашифрованный ключ промежуточного CA
 ├── certs/
-│   ├── ca.cert.pem             # сертификат корневого CA
-│   ├── intermediate.cert.pem  # сертификат промежуточного CA
-│   ├── example.com.cert.pem   # серверный сертификат
-│   └── example.com.key.pem    # ключ сервера (незашифрованный)
+│   ├── ca.cert.pem                 # сертификат корневого CA
+│   ├── intermediate.cert.pem       # сертификат промежуточного CA
+│   ├── example.com.cert.pem        # серверный сертификат
+│   ├── example.com.key.pem         # ключ сервера (незашифрованный)
+│   ├── alice.cert.pem              # клиентский сертификат
+│   ├── alice.key.pem               # ключ клиента
+│   ├── code_signer.cert.pem        # сертификат подписи кода
+│   └── code_signer.key.pem         # ключ подписи кода
 ├── csrs/
-│   └── intermediate.csr.pem   # CSR промежуточного CA
-└── policy.txt                  # документ политики УЦ
+│   └── intermediate.csr.pem        # CSR промежуточного CA
+├── certificates.db                  # база данных SQLite
+└── policy.txt                 # документ политики УЦ
 ```
 ## Структура проекта
 ```text
 
 pki/
 ├── micropki/
-│   ├── __init__.py           # пакет
-│   ├── cli.py                # парсер аргументов CLI
-│   ├── ca.py                 # логика CA (init, issue-intermediate, issue-cert)
-│   ├── certificates.py       # работа с X.509 сертификатами
-│   ├── chain.py              # проверка цепочки сертификатов
-│   ├── csr.py                # генерация и обработка CSR
-│   ├── crypto_utils.py       # генерация ключей, PEM, шифрование
-│   ├── logger.py             # настройка логирования
-│   └── templates.py          # шаблоны сертификатов (server/client/code_signing)
+│   ├── __init__.py               # пакет
+│   ├── cli.py                    # парсер аргументов CLI
+│   ├── ca.py                     # логика CA (init, issue-intermediate, issue-cert)
+│   ├── certificates.py           # работа с X.509 сертификатами
+│   ├── chain.py                  # проверка цепочки сертификатов
+│   ├── csr.py                    # генерация и обработка CSR
+│   ├── crypto_utils.py           # генерация ключей, PEM, шифрование
+│   ├── logger.py                 # настройка логирования
+│   ├── templates.py              # шаблоны сертификатов (server/client/code_signing)
+│   ├── serial.py                 # генератор уникальных серийных номеров
+│   ├── database.py               # работа с SQLite (CRUD операции)
+│   └── server.py                 # REST API сервер (FastAPI)
 ├── tests/
-│   └── test_ca.py            # 39 тестов
-├── pki/pki1/                  # выходные файлы PKI (в .gitignore)
-├── secrets/                   # пароли (в .gitignore)
-├── logs/                      # логи (в .gitignore)
+│   ├── test_ca.py                # тесты спринтов 1-2 (39 тестов)
+│   └── test_sprint3.py           # тесты спринта 3 (18 тестов)
+├── pki/pki1/                     # выходные файлы PKI (в .gitignore)
+├── secrets/                      # пароли (в .gitignore)
+├── logs/                         # логи (в .gitignore)
 ├── .gitignore
 ├── requirements.txt
 ├── setup.py
 └── README.md
+```
+## Схема базы данных (SQLite)
+```
+CREATE TABLE certificates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    serial_hex TEXT UNIQUE NOT NULL,
+    subject TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    not_before TEXT NOT NULL,
+    not_after TEXT NOT NULL,
+    cert_pem TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'valid',
+    template TEXT,
+    san_entries TEXT,
+    revocation_reason TEXT,
+    revocation_date TEXT,
+    created_at TEXT NOT NULL
+);
+
+-- Индексы
+CREATE INDEX idx_serial_hex ON certificates(serial_hex);
+CREATE INDEX idx_status ON certificates(status);
+CREATE INDEX idx_subject ON certificates(subject);
+CREATE INDEX idx_issuer ON certificates(issuer);
+
 ```

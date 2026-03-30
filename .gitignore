@@ -50,3 +50,8 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Database files
+*.db
+certificates.db
+micropki.db
+
