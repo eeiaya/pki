@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Optional, List
 
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -206,16 +207,58 @@ def create_app(db_path: Path, ca_certs_dir: Path) -> FastAPI:
         )
 
     @app.get("/crl", tags=["CRL"])
-    def get_crl():
+    def get_crl(ca: Optional[str] = Query("intermediate")):
+        if ca not in ('root', 'intermediate'):
+            raise HTTPException(400, f"Invalid CA: {ca}")
 
-        return PlainTextResponse(
-            content="CRL generation not yet implemented. See Sprint 4.",
-            status_code=501,
-            media_type="text/plain",
+        # Определяем crl_dir
+        if ca_certs_dir.name == 'certs':
+            crl_dir = ca_certs_dir.parent / 'crl'
+        else:
+            crl_dir = ca_certs_dir / 'crl'
+
+        crl_path = crl_dir / f'{ca}.crl.pem'
+
+        if not crl_path.exists():
+            raise HTTPException(404, f"CRL not found for {ca} CA")
+
+        import os
+        from datetime import datetime, timezone
+        from fastapi.responses import Response
+
+        crl_content = crl_path.read_bytes()
+        mtime = os.path.getmtime(crl_path)
+        last_mod = datetime.fromtimestamp(mtime, tz=timezone.utc)
+
+        return Response(
+            content=crl_content,
+            media_type="application/pkix-crl",
             headers={
-                "X-CRL-Status": "not-implemented",
-                "Content-Type": "application/pkix-crl"
+                'Content-Disposition': f'attachment; filename="{ca}.crl"',
+                'Last-Modified': last_mod.strftime('%a, %d %b %Y %H:%M:%S GMT'),
+                'Cache-Control': 'max-age=604800',
             }
+        )
+
+    @app.get("/crl/{ca_name}.crl", tags=["CRL"])
+    def get_crl_by_path(ca_name: str):
+        if ca_name not in ('root', 'intermediate'):
+            raise HTTPException(400, f"Invalid CA: {ca_name}")
+
+        if ca_certs_dir.name == 'certs':
+            crl_dir = ca_certs_dir.parent / 'crl'
+        else:
+            crl_dir = ca_certs_dir / 'crl'
+
+        crl_path = crl_dir / f'{ca_name}.crl.pem'
+
+        if not crl_path.exists():
+            raise HTTPException(404, f"CRL not found")
+
+        from fastapi.responses import Response
+        return Response(
+            content=crl_path.read_bytes(),
+            media_type="application/pkix-crl",
         )
 
     @app.get("/statistics", response_model=Statistics, tags=["General"])

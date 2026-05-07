@@ -8,6 +8,7 @@ from .logger import setup_logger
 from .crypto_utils import read_passphrase_file
 from .ca import initialize_root_ca, issue_intermediate_ca, issue_certificate
 from .database import CertificateDatabase
+from datetime import datetime, timedelta, timezone
 
 def get_default_db_path(out_dir: Path) -> Path:
     """Получить путь к БД по умолчанию."""
@@ -177,6 +178,161 @@ def ca_issue_cert_command(args):
         for h in logger.handlers[:]:
             h.close()
             logger.removeHandler(h)
+
+
+def ca_revoke_command(args):
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_logger(log_file=log_file)
+
+    try:
+        from .revocation import parse_revocation_reason, get_reason_name
+        from .serial import is_valid_hex_serial
+
+        serial = args.serial.upper()
+        if not is_valid_hex_serial(serial):
+            raise ValueError(f"Invalid serial number format: '{serial}'")
+
+        reason = args.reason.lower()
+        reason_enum = parse_revocation_reason(reason)
+        reason_name = get_reason_name(reason_enum)
+
+        out_dir = Path(args.out_dir)
+        db_path = get_default_db_path(out_dir)
+
+        if not db_path.exists():
+            raise ValueError(f"Database not found: {db_path}")
+
+        db = CertificateDatabase(db_path)
+        cert_data = db.get_certificate(serial)
+
+        if cert_data is None:
+            raise ValueError(f"Certificate with serial {serial} not found")
+
+        if cert_data['status'] == 'revoked':
+            logger.warning(f"Certificate already revoked: {serial}")
+            print(f"\n⚠ Certificate {serial} is already revoked.", file=sys.stderr)
+            sys.exit(0)
+
+        if not args.force:
+            print(f"\nRevoke certificate {serial}?", file=sys.stderr)
+            print(f"  Subject: {cert_data['subject']}", file=sys.stderr)
+            print(f"  Reason:  {reason_name}", file=sys.stderr)
+            confirm = input("Confirm [y/N]: ")
+            if confirm.lower() not in ('y', 'yes'):
+                print("Cancelled.", file=sys.stderr)
+                sys.exit(0)
+
+        db.revoke_certificate(serial, reason)
+        logger.info(f"Certificate revoked: serial={serial}, reason={reason_name}")
+        print(f"\n✓ Certificate {serial} revoked ({reason_name})", file=sys.stderr)
+
+    except Exception as e:
+        logger.error(f"Revocation error: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        for h in logger.handlers[:]:
+            h.close()
+            logger.removeHandler(h)
+
+
+def ca_gen_crl_command(args):
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_logger(log_file=log_file)
+
+    try:
+        from .crl import CRLManager
+        from .crypto_utils import load_certificate
+
+        out_dir = Path(args.out_dir)
+        db_path = get_default_db_path(out_dir)
+
+        if not db_path.exists():
+            raise ValueError(f"Database not found: {db_path}")
+
+        ca_name = args.ca.lower()
+        if ca_name not in ('root', 'intermediate'):
+            raise ValueError(f"Invalid CA: '{args.ca}'. Use 'root' or 'intermediate'.")
+
+        certs_dir = out_dir / 'certs'
+        private_dir = out_dir / 'private'
+
+        if ca_name == 'root':
+            ca_cert_path = certs_dir / 'ca.cert.pem'
+            ca_key_path = private_dir / 'ca.key.pem'
+            pass_default = './secrets/root_ca.pass'
+        else:
+            ca_cert_path = certs_dir / 'intermediate.cert.pem'
+            ca_key_path = private_dir / 'intermediate.key.pem'
+            pass_default = './secrets/intermediate_ca.pass'
+
+        if not ca_cert_path.exists():
+            raise ValueError(f"CA certificate not found: {ca_cert_path}")
+        if not ca_key_path.exists():
+            raise ValueError(f"CA key not found: {ca_key_path}")
+
+        pass_file = Path(args.ca_pass_file) if args.ca_pass_file else Path(pass_default)
+        if not pass_file.exists():
+            raise ValueError(f"Passphrase file not found: {pass_file}")
+
+        ca_passphrase = read_passphrase_file(pass_file)
+        ca_cert = load_certificate(ca_cert_path)
+        ca_subject_dn = ca_cert.subject.rfc4514_string()
+
+        db = CertificateDatabase(db_path)
+        revoked_certs = db.get_revoked_by_issuer(ca_subject_dn)
+
+        crl_manager = CRLManager(out_dir, logger)
+        out_file = Path(args.out_file) if args.out_file else None
+
+        crl_path = crl_manager.generate_and_save_crl(
+            ca_cert_path, ca_key_path, ca_passphrase,
+            revoked_certs, ca_name, args.next_update, out_file
+        )
+
+        next_update = (datetime.now(timezone.utc) + timedelta(days=args.next_update)).isoformat()
+        crl_number = crl_manager._read_crl_number(ca_name) - 1
+        db.update_crl_metadata(ca_subject_dn, crl_number, next_update, str(crl_path))
+
+        print(f"\n✓ CRL generated: {crl_path}", file=sys.stderr)
+        print(f"  Revoked: {len(revoked_certs)}, CRL#: {crl_number}", file=sys.stderr)
+
+    except Exception as e:
+        logger.error(f"CRL generation failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        for h in logger.handlers[:]:
+            h.close()
+            logger.removeHandler(h)
+
+
+def ca_check_revoked_command(args):
+    from .serial import is_valid_hex_serial
+
+    serial = args.serial.upper()
+    if not is_valid_hex_serial(serial):
+        print(f"Invalid serial: {serial}", file=sys.stderr)
+        sys.exit(1)
+
+    db_path = get_default_db_path(Path(args.out_dir))
+    if not db_path.exists():
+        print(f"Database not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    db = CertificateDatabase(db_path)
+    cert = db.get_certificate(serial)
+
+    if cert is None:
+        print(f"Certificate {serial}: NOT FOUND")
+        sys.exit(1)
+
+    if cert['status'] == 'revoked':
+        print(f"Certificate {serial}: REVOKED")
+        print(f"  Date:   {cert['revocation_date']}")
+        print(f"  Reason: {cert['revocation_reason']}")
+    else:
+        print(f"Certificate {serial}: {cert['status'].upper()}")
 
 
 def ca_list_certs_command(args):
@@ -415,6 +571,28 @@ def main():
     p.add_argument('--validity-days', type=int, default=365)
     p.add_argument('--log-file')
 
+    # ca revoke
+    p = ca_sub.add_parser('revoke', help='Revoke certificate')
+    p.add_argument('serial', help='Serial number (hex)')
+    p.add_argument('--reason', default='unspecified')
+    p.add_argument('--force', action='store_true')
+    p.add_argument('--out-dir', default='./pki/pki1')
+    p.add_argument('--log-file')
+
+    # ca gen-crl
+    p = ca_sub.add_parser('gen-crl', help='Generate CRL')
+    p.add_argument('--ca', required=True, help='root or intermediate')
+    p.add_argument('--next-update', type=int, default=7)
+    p.add_argument('--out-file')
+    p.add_argument('--ca-pass-file')
+    p.add_argument('--out-dir', default='./pki/pki1')
+    p.add_argument('--log-file')
+
+    # ca check-revoked
+    p = ca_sub.add_parser('check-revoked', help='Check revocation status')
+    p.add_argument('serial')
+    p.add_argument('--out-dir', default='./pki/pki1')
+
     # ca list-certs (CLI-13)
     p = ca_sub.add_parser('list-certs', help='List all certificates')
     p.add_argument('--db-path', default='./pki/pki1/certificates.db')
@@ -491,6 +669,12 @@ def main():
             ca_list_certs_command(args)
         elif args.ca_command == 'show-cert':
             ca_show_cert_command(args)
+        elif args.ca_command == 'revoke':
+            ca_revoke_command(args)
+        elif args.ca_command == 'gen-crl':
+            ca_gen_crl_command(args)
+        elif args.ca_command == 'check-revoked':
+            ca_check_revoked_command(args)
         else:
             ca_parser.print_help()
             sys.exit(1)

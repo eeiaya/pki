@@ -252,6 +252,66 @@ Swagger UI позволяет:
 - Тестировать запросы прямо в браузере
 - Скачивать сертификаты
 
+## Спринт 4: Отзыв сертификатов и CRL
+
+### Отзыв сертификата
+
+```bash
+# Посмотреть список сертификатов
+micropki ca list-certs
+
+# Отозвать с подтверждением
+micropki ca revoke 69C3CA5D7A53717F --reason keyCompromise
+
+# Отозвать без подтверждения
+micropki ca revoke 69C3CA5D7A53717F --reason superseded --force
+
+# Проверить статус
+micropki ca check-revoked 69C3CA5D7A53717F
+```
+### Поддерживаемые причины отзыва (RFC 5280):
+
+| Код | 	Причина	   | Описание | 
+|-|-------------|---|
+|0| unspecified |Не указана (по умолчанию)|
+|1|	keyCompromise|	Компрометация ключа|
+|2|	cACompromise|	Компрометация CA|
+|3|	affiliationChanged|	Изменение принадлежности|
+|4|	superseded|	Заменён новым сертификатом|
+|5|	cessationOfOperation|	Прекращение деятельности|
+|6|	certificateHold|	Временная приостановка|
+|8|	removeFromCRL|	Удаление из CRL|
+|9|	privilegeWithdrawn|	Отзыв привилегий|
+|10|	aACompromise|	Компрометация AA|
+
+### Генерация CRL
+```
+# CRL для корневого CA
+micropki ca gen-crl --ca root --ca-pass-file secrets/ca.pass
+
+# CRL для промежуточного CA
+micropki ca gen-crl --ca intermediate --ca-pass-file secrets/ca.pass
+
+# С указанием срока (дней до следующего обновления)
+micropki ca gen-crl --ca intermediate --ca-pass-file secrets/ca.pass --next-update 14
+
+# Сохранить в произвольный файл
+micropki ca gen-crl --ca root --ca-pass-file secrets/ca.pass --out-file ./backup/root.crl.pem
+```
+### Получение CRL через API
+```
+# CRL промежуточного CA (по умолчанию)
+curl http://localhost:8080/crl
+
+# CRL корневого CA
+curl http://localhost:8080/crl?ca=root
+
+# Альтернативный путь
+curl http://localhost:8080/crl/intermediate.crl
+curl http://localhost:8080/crl/root.crl
+```
+### 
+
 ## Тестирование
 ### Модульные тесты
 ```
@@ -442,12 +502,82 @@ curl http://localhost:8080/certificate/INVALID_XYZ
 curl http://localhost:8080/certificate/12G45
 # Ожидаемый результат: 400 Bad Request
 ```
-### TEST-12: CRL заглушка — 501 Not Implemented
+### TEST-12: Получение CRL через API
+
 ```
 curl http://localhost:8080/crl
-# Ожидаемый результат: 501 Not Implemented
-# Тело ответа: "CRL generation not yet implemented. See Sprint 4."
+# Ожидаемый результат: 200 OK, Content-Type: application/pkix-crl
+
+curl http://localhost:8080/crl?ca=root
+# Ожидаемый результат: 200 OK (CRL корневого CA)
 ```
+### TEST-13: Полный цикл отзыва
+```
+# 1. Выпустить сертификат
+micropki ca issue-cert \
+    --ca-cert pki/pki1/certs/intermediate.cert.pem \
+    --ca-key pki/pki1/private/intermediate.key.pem \
+    --ca-pass-file secrets/ca.pass \
+    --template server \
+    --subject "CN=revoke-test.com" \
+    --san dns:revoke-test.com
+
+# 2. Проверить статус — должен быть valid
+micropki ca list-certs --status valid
+
+# 3. Отозвать
+micropki ca revoke <SERIAL> --reason keyCompromise --force
+
+# 4. Проверить статус — должен быть revoked
+micropki ca check-revoked <SERIAL>
+# Вывод: Certificate <SERIAL>: REVOKED
+
+# 5. Сгенерировать CRL
+micropki ca gen-crl --ca intermediate --ca-pass-file secrets/ca.pass
+
+# 6. Проверить что сертификат в CRL
+python -c "
+from micropki.crl import load_crl
+crl = load_crl('pki/pki1/crl/intermediate.crl.pem')
+print(f'Revoked certificates: {len(list(crl))}')
+"
+```
+### TEST-14: Увеличение номера CRL
+```
+# Генерируем CRL дважды
+micropki ca gen-crl --ca root --ca-pass-file secrets/ca.pass
+# Вывод: CRL#: 1
+
+micropki ca gen-crl --ca root --ca-pass-file secrets/ca.pass
+# Вывод: CRL#: 2
+```
+### TEST-15: Негативные тесты отзыва
+```
+# Несуществующий сертификат
+micropki ca revoke DEADBEEF --reason keyCompromise
+# Результат: Error: Certificate with serial DEADBEEF not found
+
+# Повторный отзыв
+micropki ca revoke <SERIAL> --reason superseded
+# Результат: Certificate <SERIAL> is already revoked (код возврата 0)
+
+# Невалидная причина
+micropki ca revoke <SERIAL> --reason invalidReason
+# Результат: Error: Unsupported revocation reason
+```
+### TEST-16: CRL через HTTP API
+```
+# Запустить сервер
+micropki repo serve --port 8080
+
+# Получить CRL
+curl http://localhost:8080/crl --output intermediate.crl.pem
+
+# Проверить Content-Type
+curl -I http://localhost:8080/crl
+# Content-Type: application/pkix-crl
+```
+
 ## Структура выходных файлов
 ```text
 
@@ -464,6 +594,9 @@ pki/pki1/
 │   ├── alice.key.pem               # ключ клиента
 │   ├── code_signer.cert.pem        # сертификат подписи кода
 │   └── code_signer.key.pem         # ключ подписи кода
+├── crl/                             
+│   ├── root.crl.pem                
+│   └── intermediate.crl.pem
 ├── csrs/
 │   └── intermediate.csr.pem        # CSR промежуточного CA
 ├── certificates.db                  # база данных SQLite
@@ -481,6 +614,8 @@ pki/
 │   ├── chain.py                  # проверка цепочки сертификатов
 │   ├── csr.py                    # генерация и обработка CSR
 │   ├── crypto_utils.py           # генерация ключей, PEM, шифрование
+│   ├── crl.py                    # генерация CRL
+│   ├── revocation.py             # коды причин отзыва
 │   ├── logger.py                 # настройка логирования
 │   ├── templates.py              # шаблоны сертификатов (server/client/code_signing)
 │   ├── serial.py                 # генератор уникальных серийных номеров
@@ -488,7 +623,8 @@ pki/
 │   └── server.py                 # REST API сервер (FastAPI)
 ├── tests/
 │   ├── test_ca.py                # тесты спринтов 1-2 (39 тестов)
-│   └── test_sprint3.py           # тесты спринта 3 (18 тестов)
+│   ├── test_sprint3.py           # тесты спринта 3 (18 тестов)
+│   └── test_sprint4.py           # тесты спринта 4 (18 тестов)
 ├── pki/pki1/                     # выходные файлы PKI (в .gitignore)
 ├── secrets/                      # пароли (в .gitignore)
 ├── logs/                         # логи (в .gitignore)
@@ -521,4 +657,14 @@ CREATE INDEX idx_status ON certificates(status);
 CREATE INDEX idx_subject ON certificates(subject);
 CREATE INDEX idx_issuer ON certificates(issuer);
 
+CREATE TABLE crl_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ca_subject TEXT NOT NULL UNIQUE,
+    crl_number INTEGER NOT NULL,
+    last_generated TEXT NOT NULL,
+    next_update TEXT NOT NULL,
+    crl_path TEXT NOT NULL
+);
+
+CREATE INDEX idx_ca_subject ON crl_metadata(ca_subject);
 ```
