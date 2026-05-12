@@ -30,14 +30,12 @@ ENV/
 env/
 
 # PKI sensitive files
-pki1/certs/
-pki1/private/
-pki1/policy.txt
-# *.key
-# *.key.pem
-# *.pass
+pki/
+pki1/
 secrets/
 logs/
+*.key.pem
+*.pass
 
 # IDE
 .vscode/
@@ -52,6 +50,12 @@ Thumbs.db
 
 # Database files
 *.db
+*.sqlite
+*.sqlite3
 certificates.db
 micropki.db
 
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/

@@ -334,6 +334,96 @@ def ca_check_revoked_command(args):
     else:
         print(f"Certificate {serial}: {cert['status'].upper()}")
 
+def ca_issue_ocsp_cert_command(args):
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_logger(log_file=log_file)
+
+    try:
+        from .ca import issue_ocsp_certificate
+
+        if not Path(args.ca_cert).exists():
+            raise ValueError(f"CA certificate not found: {args.ca_cert}")
+        if not Path(args.ca_key).exists():
+            raise ValueError(f"CA key not found: {args.ca_key}")
+        if not Path(args.ca_pass_file).exists():
+            raise ValueError(f"Passphrase file not found: {args.ca_pass_file}")
+
+        ca_pass = read_passphrase_file(Path(args.ca_pass_file))
+        san_entries = args.san if args.san else []
+        out_dir = Path(args.out_dir)
+
+        if out_dir.name == 'certs':
+            db_path = out_dir.parent / 'certificates.db'
+        else:
+            db_path = out_dir / 'certificates.db'
+
+        issue_ocsp_certificate(
+            ca_cert_path=Path(args.ca_cert),
+            ca_key_path=Path(args.ca_key),
+            ca_passphrase=ca_pass,
+            subject_dn=args.subject,
+            key_type=args.key_type,
+            key_size=args.key_size,
+            san_entries=san_entries,
+            out_dir=out_dir,
+            validity_days=args.validity_days,
+            logger=logger,
+            db_path=db_path,
+            ocsp_url=args.ocsp_url
+        )
+
+        print("\n✓ OCSP responder certificate issued!", file=sys.stderr)
+        print(f"  Cert: {out_dir}/ocsp.cert.pem", file=sys.stderr)
+        print(f"  Key:  {out_dir}/ocsp.key.pem", file=sys.stderr)
+
+    except Exception as e:
+        logger.error(f"OCSP cert issuance failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        for h in logger.handlers[:]:
+            h.close()
+            logger.removeHandler(h)
+
+
+def ocsp_serve_command(args):
+    try:
+        import uvicorn
+        from .ocsp_responder import create_ocsp_app
+        from .logger import setup_logger as _setup
+
+        log_file = Path(args.log_file) if args.log_file else None
+        logger = _setup(log_file=log_file)
+
+        for f in [args.responder_cert, args.responder_key, args.ca_cert]:
+            if not Path(f).exists():
+                raise ValueError(f"File not found: {f}")
+
+        app = create_ocsp_app(
+            db_path=Path(args.db_path),
+            responder_cert_path=Path(args.responder_cert),
+            responder_key_path=Path(args.responder_key),
+            ca_cert_path=Path(args.ca_cert),
+            cache_ttl=args.cache_ttl,
+            logger=logger
+        )
+
+        print("=" * 60)
+        print("MicroPKI OCSP Responder")
+        print("=" * 60)
+        print(f"Host:      {args.host}")
+        print(f"Port:      {args.port}")
+        print(f"Endpoint:  http://{args.host}:{args.port}/ocsp")
+        print(f"Cache TTL: {args.cache_ttl}s")
+        print("-" * 60)
+        print("Press Ctrl+C to stop.")
+        print("=" * 60 + "\n")
+
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+    except Exception as e:
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def ca_list_certs_command(args):
     """ca list-certs (алиас для db list)"""
@@ -593,6 +683,20 @@ def main():
     p.add_argument('serial')
     p.add_argument('--out-dir', default='./pki/pki1')
 
+    # ca issue-ocsp-cert
+    p = ca_sub.add_parser('issue-ocsp-cert', help='Issue OCSP responder certificate')
+    p.add_argument('--ca-cert', required=True)
+    p.add_argument('--ca-key', required=True)
+    p.add_argument('--ca-pass-file', required=True)
+    p.add_argument('--subject', required=True)
+    p.add_argument('--key-type', choices=['rsa', 'ecc'], default='rsa')
+    p.add_argument('--key-size', type=int, default=2048)
+    p.add_argument('--san', action='append')
+    p.add_argument('--out-dir', default='./pki/pki1/certs')
+    p.add_argument('--validity-days', type=int, default=365)
+    p.add_argument('--ocsp-url')
+    p.add_argument('--log-file')
+
     # ca list-certs (CLI-13)
     p = ca_sub.add_parser('list-certs', help='List all certificates')
     p.add_argument('--db-path', default='./pki/pki1/certificates.db')
@@ -605,6 +709,20 @@ def main():
     p.add_argument('serial', help='Serial number (hex)')
     p.add_argument('--db-path', default='./pki/pki1/certificates.db')
     p.add_argument('--format', choices=['table', 'pem'], default='table')
+
+    # OCSP команды
+    ocsp_parser = subparsers.add_parser('ocsp', help='OCSP responder operations')
+    ocsp_sub = ocsp_parser.add_subparsers(dest='ocsp_command')
+
+    p = ocsp_sub.add_parser('serve', help='Start OCSP responder')
+    p.add_argument('--host', default='127.0.0.1')
+    p.add_argument('--port', type=int, default=8081)
+    p.add_argument('--db-path', default='./pki/pki1/certificates.db')
+    p.add_argument('--responder-cert', required=True)
+    p.add_argument('--responder-key', required=True)
+    p.add_argument('--ca-cert', required=True)
+    p.add_argument('--cache-ttl', type=int, default=60)
+    p.add_argument('--log-file')
 
     db_parser = subparsers.add_parser('db', help='Database operations')
     db_sub = db_parser.add_subparsers(dest='db_command')
@@ -675,6 +793,8 @@ def main():
             ca_gen_crl_command(args)
         elif args.ca_command == 'check-revoked':
             ca_check_revoked_command(args)
+        elif args.ca_command == 'issue-ocsp-cert':
+            ca_issue_ocsp_cert_command(args)
         else:
             ca_parser.print_help()
             sys.exit(1)
@@ -706,6 +826,13 @@ def main():
             repo_serve_command(args)
         else:
             server_parser.print_help()
+            sys.exit(1)
+
+    elif args.command == 'ocsp':
+        if args.ocsp_command == 'serve':
+            ocsp_serve_command(args)
+        else:
+            ocsp_parser.print_help()
             sys.exit(1)
 
     else:

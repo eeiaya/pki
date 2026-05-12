@@ -347,3 +347,93 @@ def get_cn_from_subject(subject: x509.Name) -> str:
         if attr.oid == NameOID.COMMON_NAME:
             return attr.value
     return "unknown"
+
+def create_ocsp_certificate(
+    subject: x509.Name,
+    public_key,
+    ca_key,
+    ca_cert: x509.Certificate,
+    validity_days: int = 365,
+    san_extension: Optional[x509.SubjectAlternativeName] = None,
+    ocsp_url: Optional[str] = None
+) -> x509.Certificate:
+
+    from cryptography.x509.oid import ExtendedKeyUsageOID
+    from .serial import generate_serial_number
+
+    hash_algorithm = _get_hash_algorithm(ca_key)
+    serial = generate_serial_number()
+    now = datetime.now(timezone.utc)
+
+    leaf_ski = compute_ski(public_key)
+    ca_ski = ca_cert.extensions.get_extension_for_class(
+        x509.SubjectKeyIdentifier
+    ).value.digest
+
+    builder = x509.CertificateBuilder()
+    builder = builder.subject_name(subject)
+    builder = builder.issuer_name(ca_cert.subject)
+    builder = builder.public_key(public_key)
+    builder = builder.serial_number(serial)
+    builder = builder.not_valid_before(now)
+    builder = builder.not_valid_after(now + timedelta(days=validity_days))
+
+    builder = builder.add_extension(
+        x509.BasicConstraints(ca=False, path_length=None), critical=True
+    )
+
+    builder = builder.add_extension(
+        x509.KeyUsage(
+            digital_signature=True,
+            key_encipherment=False,
+            content_commitment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=False,
+            crl_sign=False,
+            encipher_only=False,
+            decipher_only=False
+        ),
+        critical=True
+    )
+
+    # OCSPSigning EKU
+    builder = builder.add_extension(
+        x509.ExtendedKeyUsage([ExtendedKeyUsageOID.OCSP_SIGNING]),
+        critical=False
+    )
+
+    builder = builder.add_extension(
+        x509.SubjectKeyIdentifier(leaf_ski), critical=False
+    )
+
+    builder = builder.add_extension(
+        x509.AuthorityKeyIdentifier(
+            key_identifier=ca_ski,
+            authority_cert_issuer=None,
+            authority_cert_serial_number=None
+        ),
+        critical=False
+    )
+
+    if san_extension:
+        builder = builder.add_extension(san_extension, critical=False)
+
+    # AIA с OCSP URI если указан
+    if ocsp_url:
+        builder = builder.add_extension(
+            x509.AuthorityInformationAccess([
+                x509.AccessDescription(
+                    x509.AuthorityInformationAccessOID.OCSP,
+                    x509.UniformResourceIdentifier(ocsp_url)
+                )
+            ]),
+            critical=False
+        )
+
+    # NoCheck расширение (RFC 6960: ответчику не нужна проверка отзыва)
+    builder = builder.add_extension(
+        x509.OCSPNoCheck(), critical=False
+    )
+
+    return builder.sign(ca_key, hash_algorithm, default_backend())

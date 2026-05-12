@@ -311,6 +311,198 @@ curl http://localhost:8080/crl/intermediate.crl
 curl http://localhost:8080/crl/root.crl
 ```
 ### 
+## Спринт 5: OCSP-ответчик
+
+### Выпуск сертификата OCSP-ответчика
+
+ Сертификат OCSP-ответчика выпускается промежуточным CA и имеет специальное расширение Extended Key Usage = OCSPSigning.
+
+```bash
+micropki ca issue-ocsp-cert \
+    --ca-cert pki/pki1/certs/intermediate.cert.pem \
+    --ca-key pki/pki1/private/intermediate.key.pem \
+    --ca-pass-file secrets/ca.pass \
+    --subject "CN=OCSP Responder,O=MicroPKI" \
+    --key-type rsa \
+    --key-size 2048 \
+    --san dns:ocsp.example.com \
+    --out-dir pki/pki1/certs \
+    --validity-days 365
+````
+ В каталоге pki/pki1/certs/ появятся два файла:
+
+* ocsp.cert.pem — сертификат OCSP-ответчика
+* ocsp.key.pem — приватный ключ без шифрования (нужно для автозагрузки сервером)
+
+Важно: приватный ключ OCSP-ответчика хранится без пароля. Защищайте его правами доступа файловой системы.
+### Запуск OCSP-ответчика
+OCSP-ответчик работает как отдельный HTTP-сервер на порту 8081:
+```bash
+micropki ocsp serve \
+    --host 127.0.0.1 \
+    --port 8081 \
+    --db-path pki/pki1/certificates.db \
+    --responder-cert pki/pki1/certs/ocsp.cert.pem \
+    --responder-key pki/pki1/certs/ocsp.key.pem \
+    --ca-cert pki/pki1/certs/intermediate.cert.pem \
+    --cache-ttl 60
+```
+Пример вывода:
+```text
+============================================================
+MicroPKI OCSP Responder
+============================================================
+Host:      127.0.0.1
+Port:      8081
+Endpoint:  http://127.0.0.1:8081/ocsp
+Cache TTL: 60s
+------------------------------------------------------------
+Press Ctrl+C to stop.
+============================================================
+```
+### Эндпоинт OCSP
+| Параметр             | Значение |
+|----------------------|----------|
+| Метод                | POST     |
+| URL                  | http://127.0.0.1:8081/ocsp |
+| Content-Type запроса | application/ocsp-request   |
+| Content-Type ответа  | application/ocsp-response  |
+| Тело запроса         | DER-кодированный OCSPRequest (RFC 6960)|
+| Тело ответа          | DER-кодированный OCSPResponse (RFC 6960)|
+
+#### Что такое nonce
+nonce — это случайное значение, которое клиент включает в OCSP-запрос. OCSP-ответчик обязан вернуть точно тот же nonce в ответе.
+Зачем это нужно:
+
+* защита от replay-атак (нельзя подсунуть старый кэшированный ответ)
+* подтверждение, что ответ свежий и относится к конкретному запросу
+
+Если в запросе nonce есть — он должен быть в ответе.
+Если в запросе nonce нет — ответчик НЕ добавляет его в ответ.
+
+### Проверка работы OCSP
+После запуска ответчика проверки можно делать через Python.
+##### Проверка статуса GOOD
+```PowerShell
+@'
+from urllib.request import Request, urlopen
+from cryptography import x509
+from cryptography.x509 import ocsp
+from cryptography.hazmat.primitives import hashes, serialization
+
+def load_cert(p):
+    with open(p, "rb") as f:
+        return x509.load_pem_x509_certificate(f.read())
+
+issuer = load_cert("pki/pki1/certs/intermediate.cert.pem")
+cert = load_cert("pki/pki1/certs/alice.cert.pem")
+
+req = ocsp.OCSPRequestBuilder().add_certificate(cert, issuer, hashes.SHA1()).build()
+data = req.public_bytes(serialization.Encoding.DER)
+
+r = Request("http://127.0.0.1:8081/ocsp", data=data,
+            headers={"Content-Type": "application/ocsp-request"}, method="POST")
+with urlopen(r) as resp:
+    body = resp.read()
+
+result = ocsp.load_der_ocsp_response(body)
+print("Cert status:", result.certificate_status)
+'@ | python -
+```
+Ожидаемый вывод:
+```text
+Cert status: OCSPCertStatus.GOOD
+```
+### Проверка статуса REVOKED
+```PowerShell
+@'
+from urllib.request import Request, urlopen
+from cryptography import x509
+from cryptography.x509 import ocsp
+from cryptography.hazmat.primitives import hashes, serialization
+
+def load_cert(p):
+    with open(p, "rb") as f:
+        return x509.load_pem_x509_certificate(f.read())
+
+issuer = load_cert("pki/pki1/certs/intermediate.cert.pem")
+cert = load_cert("pki/pki1/certs/example.com.cert.pem")
+
+req = ocsp.OCSPRequestBuilder().add_certificate(cert, issuer, hashes.SHA1()).build()
+data = req.public_bytes(serialization.Encoding.DER)
+
+r = Request("http://127.0.0.1:8081/ocsp", data=data,
+            headers={"Content-Type": "application/ocsp-request"}, method="POST")
+with urlopen(r) as resp:
+    body = resp.read()
+
+result = ocsp.load_der_ocsp_response(body)
+print("Cert status:    ", result.certificate_status)
+print("Revocation time:", result.revocation_time_utc)
+print("Reason:         ", result.revocation_reason)
+'@ | python -
+```
+Ожидаемый вывод:
+```text
+Cert status:     OCSPCertStatus.REVOKED
+Revocation time: 2026-...
+Reason:          ReasonFlags.key_compromise
+```
+#### Проверка nonce
+```PowerShell
+@'
+import os
+from urllib.request import Request, urlopen
+from cryptography import x509
+from cryptography.x509 import ocsp
+from cryptography.hazmat.primitives import hashes, serialization
+
+def load_cert(p):
+    with open(p, "rb") as f:
+        return x509.load_pem_x509_certificate(f.read())
+
+issuer = load_cert("pki/pki1/certs/intermediate.cert.pem")
+cert = load_cert("pki/pki1/certs/alice.cert.pem")
+
+nonce = os.urandom(16)
+builder = ocsp.OCSPRequestBuilder().add_certificate(cert, issuer, hashes.SHA1())
+builder = builder.add_extension(x509.OCSPNonce(nonce), critical=False)
+req = builder.build()
+
+data = req.public_bytes(serialization.Encoding.DER)
+r = Request("http://127.0.0.1:8081/ocsp", data=data,
+            headers={"Content-Type": "application/ocsp-request"}, method="POST")
+with urlopen(r) as resp:
+    body = resp.read()
+
+result = ocsp.load_der_ocsp_response(body)
+resp_nonce = result.extensions.get_extension_for_class(x509.OCSPNonce).value.nonce
+print("Match:", nonce == resp_nonce)
+'@ | python -
+```
+Ожидаемый вывод:
+```text
+Match: True
+```
+### Проверка через OpenSSL
+Если установлен OpenSSL, можно использовать стандартный клиент:
+```bash
+# Запрос статуса сертификата
+openssl ocsp \
+    -issuer pki/pki1/certs/intermediate.cert.pem \
+    -cert pki/pki1/certs/alice.cert.pem \
+    -url http://127.0.0.1:8081/ocsp \
+    -resp_text \
+    -noverify
+
+# Проверка подписи ответа
+openssl ocsp \
+    -issuer pki/pki1/certs/intermediate.cert.pem \
+    -cert pki/pki1/certs/alice.cert.pem \
+    -url http://127.0.0.1:8081/ocsp \
+    -CAfile pki/pki1/certs/ca.cert.pem \
+    -VAfile pki/pki1/certs/ocsp.cert.pem
+```
 
 ## Тестирование
 ### Модульные тесты
@@ -577,6 +769,21 @@ curl http://localhost:8080/crl --output intermediate.crl.pem
 curl -I http://localhost:8080/crl
 # Content-Type: application/pkix-crl
 ```
+### Тесты спринта 5
+```bash
+pytest tests/test_sprint5.py -v
+# Результат: 30 passed
+```
+#### Тесты покрывают:
+
+* профиль OCSP-сертификата (BasicConstraints, KeyUsage, EKU = OCSPSigning)
+* статус GOOD для valid сертификатов
+* статус REVOKED с датой и причиной отзыва
+* статус UNKNOWN для несуществующих серийных номеров
+* echo nonce в ответе
+* malformed-request обработка
+* интеграционный тест полного жизненного цикла
+
 
 ## Структура выходных файлов
 ```text
@@ -593,7 +800,9 @@ pki/pki1/
 │   ├── alice.cert.pem              # клиентский сертификат
 │   ├── alice.key.pem               # ключ клиента
 │   ├── code_signer.cert.pem        # сертификат подписи кода
-│   └── code_signer.key.pem         # ключ подписи кода
+│   ├── code_signer.key.pem         # ключ подписи кода
+│   ├── ocsp.cert.pem               # сертификат OCSP-ответчика
+│   └── ocsp.key.pem                # ключ OCSP-ответчика, без шифрования
 ├── crl/                             
 │   ├── root.crl.pem                
 │   └── intermediate.crl.pem
@@ -617,6 +826,8 @@ pki/
 │   ├── crl.py                    # генерация CRL
 │   ├── revocation.py             # коды причин отзыва
 │   ├── logger.py                 # настройка логирования
+│   ├── ocsp.py                   # OCSP handler
+│   ├── ocsp_responder.py         # OCSP HTTP сервер
 │   ├── templates.py              # шаблоны сертификатов (server/client/code_signing)
 │   ├── serial.py                 # генератор уникальных серийных номеров
 │   ├── database.py               # работа с SQLite (CRUD операции)
@@ -624,7 +835,8 @@ pki/
 ├── tests/
 │   ├── test_ca.py                # тесты спринтов 1-2 (39 тестов)
 │   ├── test_sprint3.py           # тесты спринта 3 (18 тестов)
-│   └── test_sprint4.py           # тесты спринта 4 (18 тестов)
+│   ├── test_sprint4.py           # тесты спринта 4 (18 тестов)
+│   └── test_sprint5.py 
 ├── pki/pki1/                     # выходные файлы PKI (в .gitignore)
 ├── secrets/                      # пароли (в .gitignore)
 ├── logs/                         # логи (в .gitignore)

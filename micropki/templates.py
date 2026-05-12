@@ -46,12 +46,21 @@ CODE_SIGNING_TEMPLATE = CertTemplate(
     allowed_san_types={"dns", "uri"},
     san_required=False,
 )
-
+OCSP_TEMPLATE = CertTemplate(
+    name="ocsp",
+    digital_signature=True,
+    key_encipherment=False,
+    key_agreement=False,
+    extended_key_usages=["ocspSigning"],
+    allowed_san_types={"dns", "uri"},
+    san_required=False,
+)
 # Словарь для быстрого доступа по имени
 TEMPLATES = {
     "server": SERVER_TEMPLATE,
     "client": CLIENT_TEMPLATE,
     "code_signing": CODE_SIGNING_TEMPLATE,
+    "ocsp": OCSP_TEMPLATE,
 }
 
 

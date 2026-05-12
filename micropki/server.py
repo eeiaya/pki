@@ -261,6 +261,47 @@ def create_app(db_path: Path, ca_certs_dir: Path) -> FastAPI:
             media_type="application/pkix-crl",
         )
 
+    @app.post("/ocsp", tags=["OCSP"])
+    async def ocsp_endpoint(request: Request):
+        content_type = request.headers.get("content-type", "")
+        if "application/ocsp-request" not in content_type:
+            raise HTTPException(status_code=400, detail="Expected application/ocsp-request")
+
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="Empty body")
+
+        # Ищем файлы ответчика
+        ocsp_cert_path = ca_certs_dir / 'ocsp.cert.pem'
+        ocsp_key_path = ca_certs_dir / 'ocsp.key.pem'
+        ca_cert_path = ca_certs_dir / 'intermediate.cert.pem'
+
+        if not ocsp_cert_path.exists() or not ocsp_key_path.exists():
+            raise HTTPException(
+                status_code=501,
+                detail="OCSP responder certificate not found. Run: micropki ca issue-ocsp-cert"
+            )
+
+        from .ocsp import OCSPHandler
+        from .ocsp_responder import load_unencrypted_private_key
+        from .crypto_utils import load_certificate
+
+        ca_cert = load_certificate(ca_cert_path)
+        responder_cert = load_certificate(ocsp_cert_path)
+        responder_key = load_unencrypted_private_key(ocsp_key_path)
+
+        handler = OCSPHandler(
+            db=db,
+            ca_cert=ca_cert,
+            responder_cert=responder_cert,
+            responder_key=responder_key
+        )
+
+        client_ip = request.client.host if request.client else "unknown"
+        response_der = handler.handle_request(body, client_ip)
+
+        return Response(content=response_der, media_type="application/ocsp-response")
+
     @app.get("/statistics", response_model=Statistics, tags=["General"])
     def get_statistics():
 

@@ -478,3 +478,83 @@ Purpose:         Issuing CA for end-entity certificates
 """
     with open(path, 'a', encoding='utf-8') as f:
         f.write(addition)
+
+def issue_ocsp_certificate(
+        ca_cert_path: Path,
+        ca_key_path: Path,
+        ca_passphrase: bytes,
+        subject_dn: str,
+        key_type: str = 'rsa',
+        key_size: int = 2048,
+        san_entries: list = None,
+        out_dir: Path = None,
+        validity_days: int = 365,
+        logger: logging.Logger = None,
+        db_path: Optional[Path] = None,
+        ocsp_url: Optional[str] = None
+) -> None:
+
+    if logger is None:
+        logger = logging.getLogger('micropki')
+
+    logger.info("=" * 60)
+    logger.info("Issuing OCSP Responder certificate")
+    logger.info("=" * 60)
+
+    ca_cert = load_certificate(ca_cert_path)
+    ca_key = load_encrypted_private_key(ca_key_path, ca_passphrase)
+
+    subject = parse_subject_dn(subject_dn)
+
+    if key_type == 'rsa':
+        ocsp_key = generate_rsa_key_pair(key_size)
+    else:
+        ocsp_key = generate_ecc_key_pair(key_size)
+
+    san_extension = None
+    if san_entries:
+        from .certificates import parse_san_entries
+        san_extension = parse_san_entries(san_entries)
+
+    from .certificates import create_ocsp_certificate
+    cert = create_ocsp_certificate(
+        subject=subject,
+        public_key=ocsp_key.public_key(),
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        validity_days=validity_days,
+        san_extension=san_extension,
+        ocsp_url=ocsp_url
+    )
+
+    out_path = Path(out_dir) if out_dir else Path('./pki/pki1/certs')
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    cert_path = out_path / 'ocsp.cert.pem'
+    key_path = out_path / 'ocsp.key.pem'
+
+    save_certificate(cert, cert_path)
+    logger.info(f"OCSP certificate saved: {cert_path}")
+
+    # Ключ БЕЗ шифрования (ответчик должен загружать автоматически)
+    save_unencrypted_private_key(ocsp_key, key_path)
+    logger.warning(f"OCSP private key saved WITHOUT encryption: {key_path}")
+    logger.warning("Protect this file with filesystem permissions (0o600)")
+
+    if db_path:
+        try:
+            from .database import CertificateDatabase
+            from cryptography.hazmat.primitives import serialization
+            cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+            db = CertificateDatabase(db_path)
+            serial_hex = db.add_certificate(cert, cert_pem, template='ocsp')
+            logger.info(f"OCSP certificate added to DB: serial={serial_hex}")
+        except Exception as e:
+            logger.warning(f"Failed to add OCSP cert to DB: {e}")
+
+    logger.info("=" * 60)
+    logger.info("OCSP certificate issued successfully")
+    logger.info(f"  Cert: {cert_path}")
+    logger.info(f"  Key:  {key_path}")
+    logger.info("=" * 60)
+
