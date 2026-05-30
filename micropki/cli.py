@@ -1,4 +1,4 @@
-
+import json
 import sys
 import argparse
 from pathlib import Path
@@ -164,7 +164,8 @@ def ca_issue_cert_command(args):
             out_dir=out_dir,
             validity_days=args.validity_days,
             logger=logger,
-            db_path=db_path
+            db_path=db_path,
+            csr_path = Path(args.csr) if args.csr else None
         )
 
         print(f"\n✓ {args.template} certificate issued successfully!", file=sys.stderr)
@@ -333,6 +334,170 @@ def ca_check_revoked_command(args):
         print(f"  Reason: {cert['revocation_reason']}")
     else:
         print(f"Certificate {serial}: {cert['status'].upper()}")
+
+# ============================================================
+# SPRINT 6: Client commands
+# ============================================================
+
+def client_gen_csr_command(args):
+    from .client import client_gen_csr, setup_client_logger
+
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_client_logger(log_file=log_file)
+
+    try:
+        san_entries = args.san if args.san else []
+
+        client_gen_csr(
+            subject_dn=args.subject,
+            key_type=args.key_type,
+            key_size=args.key_size,
+            san_entries=san_entries,
+            out_key=Path(args.out_key),
+            out_csr=Path(args.out_csr),
+            logger=logger
+        )
+
+        print(f"\n✓ CSR generated successfully!", file=sys.stderr)
+        print(f"  Key: {args.out_key}", file=sys.stderr)
+        print(f"  CSR: {args.out_csr}", file=sys.stderr)
+
+    except Exception as e:
+        logger.error(f"CSR generation failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def client_request_cert_command(args):
+    from .client import client_request_cert, setup_client_logger
+
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_client_logger(log_file=log_file)
+
+    try:
+        client_request_cert(
+            csr_path=Path(args.csr),
+            template=args.template,
+            ca_url=args.ca_url,
+            out_cert=Path(args.out_cert),
+            api_key=args.api_key,
+            logger=logger
+        )
+
+        print(f"\n✓ Certificate received from CA!", file=sys.stderr)
+        print(f"  Saved to: {args.out_cert}", file=sys.stderr)
+
+    except Exception as e:
+        logger.error(f"Request-cert failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def client_validate_command(args):
+    from .client import client_validate, setup_client_logger
+
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_client_logger(log_file=log_file)
+
+    try:
+        untrusted = args.untrusted if args.untrusted else []
+        trusted = [args.trusted] if args.trusted else []
+
+        validation_time = None
+        if args.validation_time:
+            from datetime import datetime
+            validation_time = datetime.fromisoformat(args.validation_time)
+
+        result = client_validate(
+            cert_path=Path(args.cert),
+            trusted_paths=trusted,
+            untrusted_paths=untrusted,
+            crl_source=args.crl,
+            use_ocsp=args.ocsp,
+            mode=args.mode,
+            validation_time=validation_time,
+            check_eku=args.check_eku,
+            logger=logger
+        )
+
+        if args.format == 'json':
+            import json as _json
+            print(_json.dumps(result, indent=2, default=str))
+        else:
+            print("\n" + "=" * 70)
+            print("CERTIFICATE VALIDATION RESULT")
+            print("=" * 70)
+            print(f"Overall: {'✓ SUCCESS' if result['success'] else '✗ FAILED'}")
+            if result.get('error'):
+                print(f"Error:   {result['error']}")
+            print(f"Chain length: {result['chain_length']}")
+
+            print("\nChain:")
+            for i, subject in enumerate(result['chain']):
+                print(f"  [{i}] {subject}")
+
+            print("\nValidation steps:")
+            for step in result['steps']:
+                mark = '✓' if step['passed'] else '✗'
+                print(f"  {mark} {step['name']}: {step['message']}")
+
+            if result.get('revocation'):
+                rev = result['revocation']
+                print(f"\nRevocation check:")
+                print(f"  Status:  {rev['status']}")
+                print(f"  Method:  {rev['method']}")
+                print(f"  Message: {rev['message']}")
+                if rev.get('revocation_time'):
+                    print(f"  Revoked: {rev['revocation_time']}")
+                if rev.get('revocation_reason'):
+                    print(f"  Reason:  {rev['revocation_reason']}")
+            print("=" * 70)
+
+        if not result['success']:
+            sys.exit(1)
+
+    except Exception as e:
+        logger.error(f"Validation failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def client_check_status_command(args):
+    from .client import client_check_status, setup_client_logger
+
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_client_logger(log_file=log_file)
+
+    try:
+        result = client_check_status(
+            cert_path=Path(args.cert),
+            ca_cert_path=Path(args.ca_cert),
+            crl_source=args.crl,
+            ocsp_url=args.ocsp_url,
+            logger=logger
+        )
+
+        print("\n" + "=" * 60)
+        print("REVOCATION STATUS CHECK")
+        print("=" * 60)
+        print(f"Status:  {result.status.upper()}")
+        print(f"Method:  {result.method}")
+        print(f"Message: {result.message}")
+        if result.revocation_time:
+            print(f"Revoked: {result.revocation_time}")
+        if result.revocation_reason:
+            print(f"Reason:  {result.revocation_reason}")
+        print("=" * 60)
+
+        if result.status == 'revoked':
+            sys.exit(2)
+        elif result.status == 'unknown':
+            sys.exit(3)
+
+    except Exception as e:
+        logger.error(f"Status check failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def ca_issue_ocsp_cert_command(args):
     log_file = Path(args.log_file) if args.log_file else None
@@ -655,10 +820,11 @@ def main():
     p.add_argument('--ca-key', required=True)
     p.add_argument('--ca-pass-file', required=True)
     p.add_argument('--template', required=True, choices=['server', 'client', 'code_signing'])
-    p.add_argument('--subject', required=True)
+    p.add_argument('--subject', default='')
     p.add_argument('--san', action='append')
     p.add_argument('--out-dir', default='./pki/pki1/certs')
     p.add_argument('--validity-days', type=int, default=365)
+    p.add_argument('--csr', help='Optional CSR file to sign (overrides --subject and --san)')
     p.add_argument('--log-file')
 
     # ca revoke
@@ -722,6 +888,52 @@ def main():
     p.add_argument('--responder-key', required=True)
     p.add_argument('--ca-cert', required=True)
     p.add_argument('--cache-ttl', type=int, default=60)
+    p.add_argument('--log-file')
+
+    # ============================================================
+    # SPRINT 6: client commands
+    # ============================================================
+    client_parser = subparsers.add_parser('client', help='Client-side operations')
+    client_sub = client_parser.add_subparsers(dest='client_command')
+
+    # client gen-csr
+    p = client_sub.add_parser('gen-csr', help='Generate private key and CSR')
+    p.add_argument('--subject', required=True)
+    p.add_argument('--key-type', choices=['rsa', 'ecc'], default='rsa')
+    p.add_argument('--key-size', type=int, default=2048)
+    p.add_argument('--san', action='append')
+    p.add_argument('--out-key', default='./key.pem')
+    p.add_argument('--out-csr', default='./request.csr.pem')
+    p.add_argument('--log-file')
+
+    # client request-cert
+    p = client_sub.add_parser('request-cert', help='Send CSR to CA and get certificate')
+    p.add_argument('--csr', required=True)
+    p.add_argument('--template', required=True, choices=['server', 'client', 'code_signing'])
+    p.add_argument('--ca-url', default='http://localhost:8080')
+    p.add_argument('--out-cert', default='./cert.pem')
+    p.add_argument('--api-key', default='changeme')
+    p.add_argument('--log-file')
+
+    # client validate
+    p = client_sub.add_parser('validate', help='Validate certificate chain')
+    p.add_argument('--cert', required=True)
+    p.add_argument('--untrusted', action='append', help='Intermediate certificates (can repeat)')
+    p.add_argument('--trusted', default='./pki/pki1/certs/ca.cert.pem')
+    p.add_argument('--crl', help='CRL file path or URL')
+    p.add_argument('--ocsp', action='store_true', help='Use OCSP for revocation check')
+    p.add_argument('--mode', choices=['chain', 'full'], default='full')
+    p.add_argument('--validation-time', help='ISO 8601 datetime to use instead of now')
+    p.add_argument('--check-eku', choices=['serverAuth', 'clientAuth', 'codeSigning', 'ocspSigning'])
+    p.add_argument('--format', choices=['text', 'json'], default='text')
+    p.add_argument('--log-file')
+
+    # client check-status
+    p = client_sub.add_parser('check-status', help='Check revocation status (OCSP→CRL)')
+    p.add_argument('--cert', required=True)
+    p.add_argument('--ca-cert', required=True)
+    p.add_argument('--crl', help='CRL file path or URL')
+    p.add_argument('--ocsp-url', help='Override OCSP responder URL')
     p.add_argument('--log-file')
 
     db_parser = subparsers.add_parser('db', help='Database operations')
@@ -833,6 +1045,19 @@ def main():
             ocsp_serve_command(args)
         else:
             ocsp_parser.print_help()
+            sys.exit(1)
+
+    elif args.command == 'client':
+        if args.client_command == 'gen-csr':
+            client_gen_csr_command(args)
+        elif args.client_command == 'request-cert':
+            client_request_cert_command(args)
+        elif args.client_command == 'validate':
+            client_validate_command(args)
+        elif args.client_command == 'check-status':
+            client_check_status_command(args)
+        else:
+            client_parser.print_help()
             sys.exit(1)
 
     else:

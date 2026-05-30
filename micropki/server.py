@@ -1,4 +1,4 @@
-
+import os
 import logging
 import re
 from pathlib import Path
@@ -12,6 +12,8 @@ from pydantic import BaseModel
 
 from .database import CertificateDatabase
 from .serial import is_valid_hex_serial
+from fastapi import Body, Header
+import tempfile
 
 class CertificateInfo(BaseModel):
     serial_hex: str
@@ -301,6 +303,113 @@ def create_app(db_path: Path, ca_certs_dir: Path) -> FastAPI:
         response_der = handler.handle_request(body, client_ip)
 
         return Response(content=response_der, media_type="application/ocsp-response")
+
+    # ============================================================
+    # SPRINT 6: /request-cert endpoint
+    # ============================================================
+
+    @app.post("/request-cert", tags=["CSR"])
+    async def request_cert(
+            request: Request,
+            template: str = Query("server", description="Template: server, client, code_signing"),
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key")
+    ):
+        # Простая проверка API-ключа
+        EXPECTED_API_KEY = os.environ.get("MICROPKI_API_KEY", "changeme")
+        if x_api_key != EXPECTED_API_KEY:
+            http_logger.logger.warning(
+                f"Unauthorized /request-cert attempt from {request.client.host if request.client else 'unknown'}"
+            )
+            raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+        if template not in ('server', 'client', 'code_signing'):
+            raise HTTPException(status_code=400, detail=f"Invalid template: {template}")
+
+        # Читаем тело запроса (PEM CSR)
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="Empty request body")
+
+        # Определяем CA-файлы
+        if ca_certs_dir.name == 'certs':
+            base_dir = ca_certs_dir.parent
+        else:
+            base_dir = ca_certs_dir
+
+        ca_cert_path = ca_certs_dir / 'intermediate.cert.pem'
+        ca_key_path = base_dir / 'private' / 'intermediate.key.pem'
+
+        if not ca_cert_path.exists() or not ca_key_path.exists():
+            raise HTTPException(
+                status_code=503,
+                detail="Intermediate CA not available"
+            )
+
+        # Читаем пароль CA из переменной окружения или файла
+        ca_pass_file = os.environ.get('MICROPKI_CA_PASS_FILE', './secrets/ca.pass')
+        if not Path(ca_pass_file).exists():
+            raise HTTPException(
+                status_code=503,
+                detail=f"CA passphrase file not found: {ca_pass_file}"
+            )
+
+        with open(ca_pass_file, 'rb') as f:
+            ca_passphrase = f.read().rstrip(b'\r\n')
+
+        # Выпускаем сертификат
+        try:
+            import tempfile
+            import logging as _logging
+            from .ca import issue_certificate
+            from .crypto_utils import load_certificate as _load_cert
+
+            ca_logger = _logging.getLogger('micropki.api')
+
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir)
+
+                serial_hex = issue_certificate(
+                    ca_cert_path=ca_cert_path,
+                    ca_key_path=ca_key_path,
+                    ca_passphrase=ca_passphrase,
+                    template_name=template,
+                    subject_dn="",  # будет переопределён CSR
+                    san_entries=[],
+                    out_dir=tmp_path,
+                    validity_days=365,
+                    logger=ca_logger,
+                    db_path=db_path,
+                    csr_pem=body
+                )
+
+                # Возвращаем сертификат из БД
+                cert_data = db.get_certificate(serial_hex)
+                if not cert_data:
+                    raise HTTPException(status_code=500, detail="Certificate not saved to DB")
+
+                http_logger.logger.info(
+                    f"CSR signed: client={request.client.host if request.client else 'unknown'} "
+                    f"serial={serial_hex} template={template}"
+                )
+
+                from fastapi.responses import Response as _Response
+                return _Response(
+                    content=cert_data['cert_pem'],
+                    media_type="application/x-pem-file",
+                    status_code=201,
+                    headers={
+                        'X-Certificate-Serial': serial_hex,
+                        'Content-Disposition': f'attachment; filename="cert.pem"'
+                    }
+                )
+
+        except ValueError as e:
+            http_logger.logger.error(f"CSR rejected: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            http_logger.logger.error(f"CSR signing failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to issue certificate: {e}")
+
 
     @app.get("/statistics", response_model=Statistics, tags=["General"])
     def get_statistics():

@@ -290,25 +290,10 @@ def issue_certificate(
         key_type: str = 'rsa',
         key_size: int = 2048,
         logger: logging.Logger = None,
-        db_path: Optional[Path] = None
-) -> None:
-    """
-    Выпускает конечный сертификат (server/client/code_signing).
-
-    Args:
-        ca_cert_path: Путь к сертификату CA
-        ca_key_path: Путь к зашифрованному ключу CA
-        ca_passphrase: Пароль CA
-        template_name: Шаблон (server/client/code_signing)
-        subject_dn: DN для сертификата
-        san_entries: Список SAN записей
-        out_dir: Директория для сохранения
-        validity_days: Срок действия
-        key_type: Тип ключа (по умолчанию rsa)
-        key_size: Размер ключа (по умолчанию 2048)
-        logger: Логгер
-        db_path: Путь к базе данных
-    """
+        db_path: Optional[Path] = None,
+        csr_path: Optional[Path] = None,
+        csr_pem: Optional[bytes] = None
+) -> Optional[str]:
     if logger is None:
         logger = logging.getLogger('micropki')
 
@@ -316,9 +301,8 @@ def issue_certificate(
     logger.info(f"Issuing {template_name} certificate")
     logger.info("=" * 60)
 
-    # Валидация шаблона и SAN
+    # Валидация шаблона
     template = get_template(template_name)
-    validate_san_for_template(template, san_entries)
     logger.info(f"Template: {template_name}")
 
     # Загружаем CA
@@ -328,30 +312,80 @@ def issue_certificate(
     logger.info("Loading CA private key")
     ca_key = load_encrypted_private_key(ca_key_path, ca_passphrase)
 
-    # Парсим subject
-    subject = parse_subject_dn(subject_dn)
-    cn = get_cn_from_subject(subject)
-    logger.info(f"Subject: {subject.rfc4514_string()}")
+    # ===== РАЗВЕТВЛЕНИЕ: с CSR или без =====
+    csr = None
+    if csr_path is not None or csr_pem is not None:
+        from .csr import load_csr, verify_csr
+        from cryptography import x509 as _x509
 
-    # Парсим SAN
-    san_extension = None
-    if san_entries:
-        san_extension = parse_san_entries(san_entries)
-        logger.info(f"SAN entries: {san_entries}")
+        if csr_pem is not None:
+            logger.info("Loading CSR from memory")
+            csr = _x509.load_pem_x509_csr(csr_pem)
+        else:
+            logger.info(f"Loading CSR from: {csr_path}")
+            csr = load_csr(csr_path)
 
-    # Генерируем ключи
-    logger.info(f"Generating {key_type.upper()}-{key_size} key pair for end entity...")
-    if key_type == 'rsa':
-        entity_key = generate_rsa_key_pair(key_size)
+        # Проверяем подпись CSR
+        if not verify_csr(csr):
+            raise ValueError("CSR signature is invalid")
+        logger.info("CSR signature verified")
+
+        # Subject и public_key берём из CSR
+        subject = csr.subject
+        entity_public_key = csr.public_key()
+        logger.info(f"Subject from CSR: {subject.rfc4514_string()}")
+
+        # Проверка что CSR не запрашивает CA=True
+        try:
+            bc = csr.extensions.get_extension_for_class(_x509.BasicConstraints)
+            if bc.value.ca:
+                raise ValueError("CSR requests CA=True, which is not allowed for end-entity certificates")
+        except _x509.ExtensionNotFound:
+            pass
+
+        # SAN из CSR (переопределяет san_entries)
+        san_extension = None
+        try:
+            san_ext = csr.extensions.get_extension_for_class(_x509.SubjectAlternativeName)
+            san_extension = san_ext.value
+            san_entries = [_format_san(n) for n in san_extension]
+            logger.info(f"SAN from CSR: {san_entries}")
+        except _x509.ExtensionNotFound:
+            if san_entries:
+                san_extension = parse_san_entries(san_entries)
+                logger.info(f"SAN from arguments: {san_entries}")
+
+        # Валидация SAN для шаблона
+        validate_san_for_template(template, san_entries)
+
+        entity_key = None  # ключ не генерируем
     else:
-        entity_key = generate_ecc_key_pair(key_size)
-    logger.info("Key pair generated")
+        # Старая логика: генерируем ключ сами
+        validate_san_for_template(template, san_entries)
+
+        subject = parse_subject_dn(subject_dn)
+        logger.info(f"Subject: {subject.rfc4514_string()}")
+
+        san_extension = None
+        if san_entries:
+            san_extension = parse_san_entries(san_entries)
+            logger.info(f"SAN entries: {san_entries}")
+
+        logger.info(f"Generating {key_type.upper()}-{key_size} key pair for end entity...")
+        if key_type == 'rsa':
+            entity_key = generate_rsa_key_pair(key_size)
+        else:
+            entity_key = generate_ecc_key_pair(key_size)
+        logger.info("Key pair generated")
+        entity_public_key = entity_key.public_key()
+
+    cn = get_cn_from_subject(subject)
 
     # Создаём сертификат
     logger.info(f"Creating {template_name} certificate (valid for {validity_days} days)...")
     certificate = create_leaf_certificate(
         subject=subject,
-        public_key=entity_key.public_key(),
+        public_key=entity_public_key,
         ca_key=ca_key,
         ca_cert=ca_cert,
         template_name=template_name,
@@ -360,7 +394,7 @@ def issue_certificate(
     )
     logger.info("Certificate created and signed")
 
-    # Определяем имена файлов
+    # Имена файлов
     safe_cn = cn.replace(' ', '_').replace('*', 'wildcard')
     safe_cn = ''.join(c for c in safe_cn if c.isalnum() or c in '._-')
     if not safe_cn:
@@ -370,33 +404,31 @@ def issue_certificate(
     out_path.mkdir(parents=True, exist_ok=True)
 
     cert_path = out_path / f'{safe_cn}.cert.pem'
-    key_path = out_path / f'{safe_cn}.key.pem'
-
-    # Сохраняем сертификат
     save_certificate(certificate, cert_path)
     logger.info(f"Certificate saved: {cert_path}")
 
-    # Сохраняем ключ БЕЗ шифрования
-    save_unencrypted_private_key(entity_key, key_path)
-    logger.warning(f"Private key saved WITHOUT encryption: {key_path}")
-    logger.warning("Consider protecting this key with appropriate access controls")
+    # Ключ сохраняем только если генерировали сами
+    if entity_key is not None:
+        key_path = out_path / f'{safe_cn}.key.pem'
+        save_unencrypted_private_key(entity_key, key_path)
+        logger.warning(f"Private key saved WITHOUT encryption: {key_path}")
 
     if os.name == 'nt':
         logger.warning("Running on Windows - file permission checks skipped")
 
-    # === Сохранение в БД ===
+    # Сохранение в БД
+    serial_hex = None
     if db_path:
         try:
             from .database import CertificateDatabase
-
-            cert_pem = certificate.public_bytes(
+            cert_pem_str = certificate.public_bytes(
                 encoding=serialization.Encoding.PEM
             ).decode('utf-8')
 
             db = CertificateDatabase(db_path)
             serial_hex = db.add_certificate(
                 certificate=certificate,
-                certificate_pem=cert_pem,
+                certificate_pem=cert_pem_str,
                 template=template_name,
                 san_entries=san_entries
             )
@@ -404,20 +436,27 @@ def issue_certificate(
         except Exception as e:
             logger.warning(f"Failed to add certificate to database: {e}")
 
-    # Лог аудита
     cert_info = get_certificate_info(certificate)
     logger.info("=" * 60)
     logger.info("Certificate issued successfully")
-    logger.info(f"Template: {template_name}")
-    logger.info(f"Subject: {cert_info['subject']}")
     logger.info(f"Serial: {cert_info['serial_number']}")
-    logger.info(f"Issuer: {cert_info['issuer']}")
-    logger.info(f"Valid: {cert_info['not_valid_before']} to {cert_info['not_valid_after']}")
-    if san_entries:
-        logger.info(f"SAN: {', '.join(san_entries)}")
-    logger.info(f"Certificate: {cert_path}")
-    logger.info(f"Private Key: {key_path}")
     logger.info("=" * 60)
+
+    return serial_hex
+
+
+def _format_san(name) -> str:
+    from cryptography import x509 as _x509
+    if isinstance(name, _x509.DNSName):
+        return f"dns:{name.value}"
+    elif isinstance(name, _x509.IPAddress):
+        return f"ip:{name.value}"
+    elif isinstance(name, _x509.RFC822Name):
+        return f"email:{name.value}"
+    elif isinstance(name, _x509.UniformResourceIdentifier):
+        return f"uri:{name.value}"
+    return str(name)
+
 
 
 # ============================================================

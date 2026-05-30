@@ -1,5 +1,5 @@
 # MicroPKI
-Минималистичный инструмент для создания инфраструктуры открытых ключей (PKI) в учебных целях.
+#### Минималистичный инструмент для создания инфраструктуры открытых ключей (PKI) в учебных целях.
 
 ## Зависимости
 - Python 3.10+
@@ -503,11 +503,127 @@ openssl ocsp \
     -CAfile pki/pki1/certs/ca.cert.pem \
     -VAfile pki/pki1/certs/ocsp.cert.pem
 ```
+ ## Спринт 6: Клиентские инструменты и проверка цепочки
+
+### Генерация CSR
+
+```bash
+micropki client gen-csr \
+    --subject "CN=app.example.com,O=MicroPKI" \
+    --key-type rsa \
+    --key-size 2048 \
+    --san dns:app.example.com \
+    --san dns:api.example.com \
+    --out-key ./app.key.pem \
+    --out-csr ./app.csr.pem
+```
+#### Создаёт:
+
+* app.key.pem — приватный ключ (без шифрования, 0o600)
+* app.csr.pem — запрос на подпись сертификата (PKCS#10)
+### Запрос сертификата через API
+```bash
+micropki client request-cert \
+    --csr ./app.csr.pem \
+    --template server \
+    --ca-url http://localhost:8080 \
+    --out-cert ./app.cert.pem \
+    --api-key changeme
+```
+#### Требоания:
+* Сервер репозитория должен быть запущен (micropki repo serve)
+* API-ключ передаётся в заголовке X-API-Key (по умолчанию changeme)
+
+### Проверка цепочки сертификатов
+```bash
+# Базовая проверка (подписи + сроки)
+micropki client validate \
+    --cert ./app.cert.pem \
+    --untrusted ./pki/pki1/certs/intermediate.cert.pem \
+    --trusted ./pki/pki1/certs/ca.cert.pem \
+    --mode chain
+
+# Полная проверка (с отзывом через CRL)
+micropki client validate \
+    --cert ./app.cert.pem \
+    --untrusted ./pki/pki1/certs/intermediate.cert.pem \
+    --trusted ./pki/pki1/certs/ca.cert.pem \
+    --crl ./pki/pki1/crl/intermediate.crl.pem \
+    --mode full
+
+# С проверкой через OCSP
+micropki client validate \
+    --cert ./app.cert.pem \
+    --untrusted ./pki/pki1/certs/intermediate.cert.pem \
+    --trusted ./pki/pki1/certs/ca.cert.pem \
+    --ocsp \
+    --mode full
+
+# JSON-вывод для автоматизации
+micropki client validate \
+    --cert ./app.cert.pem \
+    --untrusted ./pki/pki1/certs/intermediate.cert.pem \
+    --trusted ./pki/pki1/certs/ca.cert.pem \
+    --format json
+```
+#### Проверяется:
+* Построение цепочки до доверенного корня
+* Подписи всех сертификатов
+* Сроки действия (notBefore/notAfter)
+* BasicConstraints (CA flag, pathLen)
+* KeyUsage (keyCertSign для CA)
+* ExtendedKeyUsage (опционально через --check-eku)
+* Статус отзыва (CRL и/или OCSP)
+
+### Проверка статуса отзыва
+```bash
+# Автоматически (OCSP из AIA → fallback на CRL из CDP)
+micropki client check-status \
+    --cert ./app.cert.pem \
+    --ca-cert ./pki/pki1/certs/intermediate.cert.pem
+
+# Принудительно через OCSP
+micropki client check-status \
+    --cert ./app.cert.pem \
+    --ca-cert ./pki/pki1/certs/intermediate.cert.pem \
+    --ocsp-url http://127.0.0.1:8081/ocsp
+
+# Принудительно через CRL
+micropki client check-status \
+    --cert ./app.cert.pem \
+    --ca-cert ./pki/pki1/certs/intermediate.cert.pem \
+    --crl ./pki/pki1/crl/intermediate.crl.pem
+```
+#### Логика проверки отзыва:
+* Сначала пробуем OCSP (если URL доступен)
+* Если OCSP недоступен → fallback на CRL
+* Если оба недоступны → статус unknown
+
+#### Вывод:
+* GOOD — сертификат действителен
+* REVOKED — отозван (с датой и причиной)
+* UNKNOWN — не удалось определить
+
+### Подпись внешнего CSR через CA
+```bash
+micropki ca issue-cert \
+    --ca-cert ./pki/pki1/certs/intermediate.cert.pem \
+    --ca-key ./pki/pki1/private/intermediate.key.pem \
+    --ca-pass-file ./secrets/ca.pass \
+    --template server \
+    --csr ./app.csr.pem \
+    --out-dir ./pki/pki1/certs
+```
+#### Особенности:
+
+* Subject и SAN берутся из CSR (игнорируются --subject и --san)
+* Проверяется подпись CSR
+* Отклоняются CSR с CA=TRUE
+* Ключ не генерируется (используется из CSR)
 
 ## Тестирование
 ### Модульные тесты
 ```
-
 pytest tests/ -v
 
 # Результат: 39 passed in 8.16s
@@ -783,7 +899,21 @@ pytest tests/test_sprint5.py -v
 * echo nonce в ответе
 * malformed-request обработка
 * интеграционный тест полного жизненного цикла
+### Тесты спринта 6
+```bash
+pytest tests/test_sprint6.py -v
+# Результат: 32 passed
+```
+#### Тесты покрывают:
 
+* Генерацию CSR (RSA/ECC, subject, SAN, подпись)
+* Подпись CSR через CA
+* Построение и валидацию цепочки
+* Проверку сроков действия
+* Проверку EKU
+* Проверку отзыва через CRL и OCSP
+* Fallback логику OCSP → CRL
+* Интеграционный полный цикл (CSR → cert → validate → revoke)
 
 ## Структура выходных файлов
 ```text
@@ -831,12 +961,16 @@ pki/
 │   ├── templates.py              # шаблоны сертификатов (server/client/code_signing)
 │   ├── serial.py                 # генератор уникальных серийных номеров
 │   ├── database.py               # работа с SQLite (CRUD операции)
+│   ├── client.py                 # клиентские функции 
+│   ├── validation.py             # проверка цепочки 
+│   ├── revocation_check.py       # проверка отзыва CRL/OCSP 
 │   └── server.py                 # REST API сервер (FastAPI)
 ├── tests/
 │   ├── test_ca.py                # тесты спринтов 1-2 (39 тестов)
 │   ├── test_sprint3.py           # тесты спринта 3 (18 тестов)
 │   ├── test_sprint4.py           # тесты спринта 4 (18 тестов)
-│   └── test_sprint5.py 
+│   ├── test_sprint5.py 
+│   └── test_sprint6.py           # тесты спринта 6 (32 теста)
 ├── pki/pki1/                     # выходные файлы PKI (в .gitignore)
 ├── secrets/                      # пароли (в .gitignore)
 ├── logs/                         # логи (в .gitignore)
@@ -880,3 +1014,71 @@ CREATE TABLE crl_metadata (
 
 CREATE INDEX idx_ca_subject ON crl_metadata(ca_subject);
 ```
+
+# Сводная таблица команд MicroPKI
+
+## Сводная таблица команд
+
+### Управление CA
+
+| Команда | Описание | Спринт |
+|---------|----------|--------|
+| `ca init` | Инициализация Root CA | 1 |
+| `ca issue-intermediate` | Создание Intermediate CA | 2 |
+| `ca issue-cert` | Выпуск конечного сертификата | 2 |
+| `ca issue-cert --csr` | Подпись внешнего CSR | 6 |
+| `ca issue-ocsp-cert` | Выпуск OCSP-сертификата | 5 |
+| `ca revoke <serial>` | Отзыв сертификата | 4 |
+| `ca gen-crl` | Генерация CRL | 4 |
+| `ca check-revoked <serial>` | Проверка статуса отзыва | 4 |
+| `ca list-certs` | Список сертификатов | 3 |
+| `ca show-cert <serial>` | Показать сертификат | 3 |
+
+### Работа с базой данных
+
+| Команда | Описание | Спринт |
+|---------|----------|--------|
+| `db init` | Инициализация БД | 3 |
+| `db list` | Список сертификатов в БД | 3 |
+| `db show <serial>` | Детали сертификата | 3 |
+| `db export <serial>` | Экспорт сертификата в файл | 3 |
+| `db stats` | Статистика БД | 3 |
+
+### HTTP-сервер репозитория
+
+| Команда | Описание | Спринт |
+|---------|----------|--------|
+| `repo serve` | Запуск HTTP-репозитория | 3 |
+| `server start` | Алиас для `repo serve` | 3 |
+
+### OCSP-ответчик
+
+| Команда | Описание | Спринт |
+|---------|----------|--------|
+| `ocsp serve` | Запуск OCSP-ответчика | 5 |
+
+### Клиентские инструменты
+
+| Команда | Описание | Спринт |
+|---------|----------|--------|
+| `client gen-csr` | Генерация ключа и CSR | 6 |
+| `client request-cert` | Запрос сертификата у CA | 6 |
+| `client validate` | Проверка цепочки сертификатов | 6 |
+| `client check-status` | Проверка статуса отзыва (OCSP→CRL) | 6 |
+
+### HTTP API эндпоинты
+
+| Метод | URL | Описание | Спринт |
+|-------|-----|----------|--------|
+| `GET` | `/` | Информация о сервисе | 3 |
+| `GET` | `/certificate/{serial}` | Получить сертификат (JSON) | 3 |
+| `GET` | `/certificate/{serial}/pem` | Получить сертификат (PEM) | 3 |
+| `GET` | `/certificates` | Список сертификатов | 3 |
+| `GET` | `/ca/root` | Сертификат корневого CA | 3 |
+| `GET` | `/ca/intermediate` | Сертификат промежуточного CA | 3 |
+| `GET` | `/statistics` | Статистика | 3 |
+| `GET` | `/search?q=...` | Поиск по subject | 3 |
+| `GET` | `/crl?ca=root\|intermediate` | Получить CRL | 4 |
+| `GET` | `/crl/{ca_name}.crl` | Альтернативный путь CRL | 4 |
+| `POST` | `/ocsp` | OCSP-запрос | 5 |
+| `POST` | `/request-cert?template=...` | Подпись CSR (требует `X-API-Key`) | 6 |
