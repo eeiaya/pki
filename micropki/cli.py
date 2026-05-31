@@ -53,8 +53,11 @@ def validate_issue_cert_args(args):
         raise ValueError(f"CA key not found: {args.ca_key}")
     if not Path(args.ca_pass_file).exists():
         raise ValueError(f"Passphrase file not found: {args.ca_pass_file}")
-    if not args.subject or not args.subject.strip():
-        raise ValueError("Subject DN cannot be empty")
+    # Subject обязателен только если не передан CSR
+    csr_provided = getattr(args, 'csr', None)
+    if not csr_provided:
+        if not args.subject or not args.subject.strip():
+            raise ValueError("Subject DN cannot be empty (or provide --csr)")
     if args.template not in ('server', 'client', 'code_signing'):
         raise ValueError(f"Unknown template: {args.template}")
 
@@ -499,6 +502,166 @@ def client_check_status_command(args):
         print(f"\n✗ Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+# ============================================================
+# SPRINT 7: Audit + Compromise commands
+# ============================================================
+
+def audit_query_command(args):
+    from .audit import query_audit_entries, format_audit_entries_table, format_audit_entries_csv, verify_audit_log
+
+    log_file = Path(args.log_file)
+
+    if not log_file.exists():
+        print(f"Audit log not found: {log_file}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        entries = query_audit_entries(
+            log_file=log_file,
+            from_ts=args.from_ts,
+            to_ts=args.to_ts,
+            level=args.level,
+            operation=args.operation,
+            serial=args.serial,
+        )
+    except Exception as e:
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.format == 'json':
+        print(json.dumps(entries, indent=2, ensure_ascii=False))
+    elif args.format == 'csv':
+        print(format_audit_entries_csv(entries))
+    else:
+        print(format_audit_entries_table(entries))
+
+    if args.verify:
+        chain_file = log_file.parent / 'chain.dat'
+        result = verify_audit_log(log_file, chain_file if chain_file.exists() else None)
+        if result.ok:
+            print("\n✓ Integrity verified", file=sys.stderr)
+        else:
+            print(f"\n✗ Integrity check FAILED: {result.message}", file=sys.stderr)
+            sys.exit(2)
+
+
+def audit_verify_command(args):
+    from .audit import verify_audit_log
+
+    log_file = Path(args.log_file)
+    chain_file = Path(args.chain_file)
+
+    if not log_file.exists():
+        print(f"Audit log not found: {log_file}", file=sys.stderr)
+        sys.exit(1)
+
+    result = verify_audit_log(log_file, chain_file if chain_file.exists() else None)
+
+    if result.ok:
+        print(f"✓ Audit log integrity OK: {log_file}")
+        print(f"  Chain file: {chain_file if chain_file.exists() else '(not used)'}")
+        sys.exit(0)
+    else:
+        print(f"✗ Audit log integrity FAILED", file=sys.stderr)
+        if result.first_bad_line is not None:
+            print(f"  First bad line: {result.first_bad_line}", file=sys.stderr)
+        print(f"  Reason: {result.message}", file=sys.stderr)
+        sys.exit(2)
+
+
+def audit_ct_verify_command(args):
+    from .transparency import CTLog
+
+    out_dir = Path(args.out_dir)
+    serial = args.serial.upper()
+
+    ct = CTLog(out_dir)
+    if ct.contains_serial(serial):
+        print(f"✓ Certificate {serial} found in CT log")
+        sys.exit(0)
+    else:
+        print(f"✗ Certificate {serial} NOT found in CT log", file=sys.stderr)
+        sys.exit(1)
+
+
+def ca_compromise_command(args):
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_logger(log_file=log_file)
+
+    try:
+        from .ca import compromise_certificate
+        from .crypto_utils import load_certificate
+
+        cert_path = Path(args.cert)
+        if not cert_path.exists():
+            raise ValueError(f"Certificate not found: {cert_path}")
+
+        out_dir = Path(args.out_dir)
+        db_path = get_default_db_path(out_dir)
+
+        if not db_path.exists():
+            raise ValueError(f"Database not found: {db_path}")
+
+        cert = load_certificate(cert_path)
+        serial_hex = format(cert.serial_number, 'X')
+
+        if not args.force:
+            print(f"\n{'='*60}", file=sys.stderr)
+            print("KEY COMPROMISE SIMULATION", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            print(f"Serial:  {serial_hex}", file=sys.stderr)
+            print(f"Subject: {cert.subject.rfc4514_string()}", file=sys.stderr)
+            print(f"Reason:  {args.reason}", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            confirm = input("Mark this certificate as compromised? [y/N]: ")
+            if confirm.lower() not in ('y', 'yes'):
+                print("Cancelled.", file=sys.stderr)
+                sys.exit(0)
+
+        # Определяем пути CA для экстренного CRL
+        certs_dir = out_dir / 'certs'
+        private_dir = out_dir / 'private'
+
+        issuer_dn = cert.issuer.rfc4514_string().lower()
+        if 'intermediate' in issuer_dn:
+            ca_cert_path = certs_dir / 'intermediate.cert.pem'
+            ca_key_path = private_dir / 'intermediate.key.pem'
+        else:
+            ca_cert_path = certs_dir / 'ca.cert.pem'
+            ca_key_path = private_dir / 'ca.key.pem'
+
+        ca_passphrase = None
+        if args.ca_pass_file and Path(args.ca_pass_file).exists():
+            ca_passphrase = read_passphrase_file(Path(args.ca_pass_file))
+
+        result = compromise_certificate(
+            cert_path=cert_path,
+            out_dir=out_dir,
+            db_path=db_path,
+            ca_passphrase=ca_passphrase,
+            ca_cert_path=ca_cert_path if ca_passphrase else None,
+            ca_key_path=ca_key_path if ca_passphrase else None,
+            reason=args.reason,
+            logger=logger,
+        )
+
+        print(f"\n✓ Certificate marked as compromised", file=sys.stderr)
+        print(f"  Serial:           {result['serial']}", file=sys.stderr)
+        print(f"  Public key hash:  {result['public_key_hash'][:32]}...", file=sys.stderr)
+        if result.get('emergency_crl'):
+            print(f"  Emergency CRL:    {result['emergency_crl']}", file=sys.stderr)
+        else:
+            print(f"  Emergency CRL:    skipped (no --ca-pass-file)", file=sys.stderr)
+
+    except Exception as e:
+        logger.error(f"Compromise failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        for h in logger.handlers[:]:
+            h.close()
+            logger.removeHandler(h)
+
 def ca_issue_ocsp_cert_command(args):
     log_file = Path(args.log_file) if args.log_file else None
     logger = setup_logger(log_file=log_file)
@@ -849,6 +1012,15 @@ def main():
     p.add_argument('serial')
     p.add_argument('--out-dir', default='./pki/pki1')
 
+    # ca compromise (Sprint 7)
+    p = ca_sub.add_parser('compromise', help='Simulate private key compromise')
+    p.add_argument('--cert', required=True, help='Path to compromised certificate (PEM)')
+    p.add_argument('--reason', default='keyCompromise')
+    p.add_argument('--force', action='store_true')
+    p.add_argument('--ca-pass-file', help='CA passphrase file for emergency CRL')
+    p.add_argument('--out-dir', default='./pki/pki1')
+    p.add_argument('--log-file')
+
     # ca issue-ocsp-cert
     p = ca_sub.add_parser('issue-ocsp-cert', help='Issue OCSP responder certificate')
     p.add_argument('--ca-cert', required=True)
@@ -936,6 +1108,33 @@ def main():
     p.add_argument('--ocsp-url', help='Override OCSP responder URL')
     p.add_argument('--log-file')
 
+    # ============================================================
+    # SPRINT 7: audit commands
+    # ============================================================
+    audit_parser = subparsers.add_parser('audit', help='Audit log operations')
+    audit_sub = audit_parser.add_subparsers(dest='audit_command')
+
+    # audit query
+    p = audit_sub.add_parser('query', help='Query audit log entries')
+    p.add_argument('--log-file', default='./pki/pki1/audit/audit.log')
+    p.add_argument('--from', dest='from_ts', help='ISO 8601 start timestamp')
+    p.add_argument('--to', dest='to_ts', help='ISO 8601 end timestamp')
+    p.add_argument('--level', choices=['INFO', 'WARNING', 'ERROR', 'AUDIT'])
+    p.add_argument('--operation', help='Filter by operation name')
+    p.add_argument('--serial', help='Filter by certificate serial (hex)')
+    p.add_argument('--format', choices=['table', 'json', 'csv'], default='table')
+    p.add_argument('--verify', action='store_true', help='Verify integrity after query')
+
+    # audit verify
+    p = audit_sub.add_parser('verify', help='Verify audit log integrity')
+    p.add_argument('--log-file', default='./pki/pki1/audit/audit.log')
+    p.add_argument('--chain-file', default='./pki/pki1/audit/chain.dat')
+
+    # audit ct-verify
+    p = audit_sub.add_parser('ct-verify', help='Check if cert serial is in CT log')
+    p.add_argument('serial', help='Certificate serial (hex)')
+    p.add_argument('--out-dir', default='./pki/pki1')
+
     db_parser = subparsers.add_parser('db', help='Database operations')
     db_sub = db_parser.add_subparsers(dest='db_command')
 
@@ -1007,6 +1206,8 @@ def main():
             ca_check_revoked_command(args)
         elif args.ca_command == 'issue-ocsp-cert':
             ca_issue_ocsp_cert_command(args)
+        elif args.ca_command == 'compromise':
+            ca_compromise_command(args)
         else:
             ca_parser.print_help()
             sys.exit(1)
@@ -1058,6 +1259,17 @@ def main():
             client_check_status_command(args)
         else:
             client_parser.print_help()
+            sys.exit(1)
+
+    elif args.command == 'audit':
+        if args.audit_command == 'query':
+            audit_query_command(args)
+        elif args.audit_command == 'verify':
+            audit_verify_command(args)
+        elif args.audit_command == 'ct-verify':
+            audit_ct_verify_command(args)
+        else:
+            audit_parser.print_help()
             sys.exit(1)
 
     else:

@@ -32,6 +32,17 @@ from .certificates import (
 from .csr import create_csr, save_csr
 from .templates import get_template, validate_san_for_template
 
+from .audit import AuditLogger
+from .policy import (
+    PolicyViolation,
+    validate_generated_key_params,
+    validate_validity_policy,
+    validate_san_policy,
+    validate_csr_policy,
+    validate_intermediate_policy,
+)
+from .transparency import CTLog
+from .compromise import public_key_hash, certificate_public_key_hash, csr_public_key_hash
 
 def initialize_root_ca(
         subject_dn: str,
@@ -58,17 +69,33 @@ def initialize_root_ca(
     """
     logger.info("=" * 60)
     logger.info("Starting Root CA initialization")
+    audit = AuditLogger(out_dir)
+    audit.audit(
+        operation="ca_init_root",
+        status="started",
+        message=f"Initializing Root CA: {subject_dn}",
+        metadata={"subject": subject_dn, "key_type": key_type, "key_size": key_size, "validity_days": validity_days}
+    )
+
     logger.info("=" * 60)
 
+
     # Валидация параметров
-    if key_type not in ('rsa', 'ecc'):
-        raise ValueError(f"Invalid key type: {key_type}")
-    if key_type == 'rsa' and key_size != 4096:
-        raise ValueError("RSA key size must be 4096 bits")
-    if key_type == 'ecc' and key_size != 384:
-        raise ValueError("ECC key size must be 384 bits (P-384)")
-    if validity_days <= 0:
-        raise ValueError("Validity days must be positive")
+    try:
+        if key_type not in ('rsa', 'ecc'):
+            raise PolicyViolation(f"Invalid key type: {key_type}")
+        validate_generated_key_params(key_type, key_size, "root_ca")
+        if validity_days <= 0:
+            raise PolicyViolation("Validity days must be positive")
+        validate_validity_policy(validity_days, "root_ca")
+    except PolicyViolation as e:
+        audit.audit(
+            operation="ca_init_root",
+            status="policy_violation",
+            message=str(e),
+            metadata={"subject": subject_dn, "key_type": key_type, "key_size": key_size, "validity_days": validity_days}
+        )
+        raise
 
     # Парсим DN
     subject = parse_subject_dn(subject_dn)
@@ -135,6 +162,19 @@ def initialize_root_ca(
     # Финальный лог
     logger.info("=" * 60)
     logger.info("Root CA initialization completed successfully")
+    audit.audit(
+        operation="ca_init_root",
+        status="success",
+        message=f"Root CA initialized: {cert_info['subject']}",
+        metadata={
+            "subject": cert_info["subject"],
+            "serial": cert_info["serial_number"],
+            "validity_days": validity_days,
+        }
+    )
+
+    ct = CTLog(out_dir)
+    ct.append(certificate)
     logger.info(f"Serial: {cert_info['serial_number']}")
     logger.info("=" * 60)
 
@@ -175,14 +215,29 @@ def issue_intermediate_ca(
     logger.info("=" * 60)
 
     # Валидация
-    if key_type == 'rsa' and key_size != 4096:
-        raise ValueError("RSA key size must be 4096")
-    if key_type == 'ecc' and key_size != 384:
-        raise ValueError("ECC key size must be 384")
-    if validity_days <= 0:
-        raise ValueError("Validity days must be positive")
-    if path_length < 0:
-        raise ValueError("Path length must be >= 0")
+    audit = AuditLogger(out_dir)
+    audit.audit(
+        operation="ca_issue_intermediate",
+        status="started",
+        message=f"Issuing intermediate CA: {subject_dn}",
+        metadata={"subject": subject_dn, "key_type": key_type, "key_size": key_size,
+                  "validity_days": validity_days, "path_length": path_length}
+    )
+
+    try:
+        validate_generated_key_params(key_type, key_size, "intermediate_ca")
+        validate_validity_policy(validity_days, "intermediate_ca")
+        validate_intermediate_policy(path_length)
+        if validity_days <= 0:
+            raise PolicyViolation("Validity days must be positive")
+    except PolicyViolation as e:
+        audit.audit(
+            operation="ca_issue_intermediate",
+            status="policy_violation",
+            message=str(e),
+            metadata={"subject": subject_dn, "validity_days": validity_days, "path_length": path_length}
+        )
+        raise
 
     # Загружаем корневой CA
     logger.info(f"Loading root CA certificate: {root_cert_path}")
@@ -273,6 +328,20 @@ def issue_intermediate_ca(
     # Финальный лог
     logger.info("=" * 60)
     logger.info("Intermediate CA created successfully")
+    audit.audit(
+        operation="ca_issue_intermediate",
+        status="success",
+        message=f"Intermediate CA issued: {cert_info['subject']}",
+        metadata={
+            "subject": cert_info["subject"],
+            "serial": cert_info["serial_number"],
+            "validity_days": validity_days,
+            "path_length": path_length,
+        }
+    )
+
+    ct = CTLog(out_dir)
+    ct.append(intermediate_cert)
     logger.info(f"Serial: {cert_info['serial_number']}")
     logger.info(f"Issuer: {cert_info['issuer']}")
     logger.info("=" * 60)
@@ -299,11 +368,34 @@ def issue_certificate(
 
     logger.info("=" * 60)
     logger.info(f"Issuing {template_name} certificate")
+    # Определяем корень для audit/CT (срезаем certs/ если надо)
+    audit_root = Path(out_dir)
+    if audit_root.name == 'certs':
+        audit_root = audit_root.parent
+
+    audit = AuditLogger(audit_root)
+    audit.audit(
+        operation="issue_certificate",
+        status="started",
+        message=f"Issuing {template_name} certificate",
+        metadata={"template": template_name, "subject": subject_dn, "csr": bool(csr_path or csr_pem)}
+    )
     logger.info("=" * 60)
 
     # Валидация шаблона
     template = get_template(template_name)
     logger.info(f"Template: {template_name}")
+
+    try:
+        validate_validity_policy(validity_days, "end_entity")
+    except PolicyViolation as e:
+        audit.audit(
+            operation="issue_certificate",
+            status="policy_violation",
+            message=str(e),
+            metadata={"template": template_name, "validity_days": validity_days}
+        )
+        raise
 
     # Загружаем CA
     logger.info(f"Loading CA certificate: {ca_cert_path}")
@@ -329,6 +421,31 @@ def issue_certificate(
         if not verify_csr(csr):
             raise ValueError("CSR signature is invalid")
         logger.info("CSR signature verified")
+        # Sprint 7: политики на CSR
+        try:
+            san_entries_from_csr = validate_csr_policy(csr, template_name, "end_entity")
+        except PolicyViolation as e:
+            audit.audit(
+                operation="issue_certificate",
+                status="policy_violation",
+                message=str(e),
+                metadata={"template": template_name, "subject": csr.subject.rfc4514_string()}
+            )
+            raise
+
+        # Sprint 7: блокировка скомпрометированного ключа
+        pk_hash = csr_public_key_hash(csr)
+        if db_path:
+            from .database import CertificateDatabase as _DB
+            _db = _DB(db_path)
+            if _db.is_key_compromised(pk_hash):
+                audit.audit(
+                    operation="issue_certificate",
+                    status="policy_violation",
+                    message="CSR uses a compromised public key",
+                    metadata={"public_key_hash": pk_hash}
+                )
+                raise PolicyViolation("Public key is marked as compromised; refusing to issue")
 
         # Subject и public_key берём из CSR
         subject = csr.subject
@@ -359,9 +476,23 @@ def issue_certificate(
         validate_san_for_template(template, san_entries)
 
         entity_key = None  # ключ не генерируем
+
     else:
         # Старая логика: генерируем ключ сами
-        validate_san_for_template(template, san_entries)
+        try:
+            validate_san_for_template(template, san_entries)
+            validate_san_policy(template_name, san_entries)
+            validate_generated_key_params(key_type, key_size, "end_entity")
+        except PolicyViolation as e:
+            audit.audit(
+                operation="issue_certificate",
+                status="policy_violation",
+                message=str(e),
+                metadata={"template": template_name, "san": san_entries}
+            )
+            raise
+
+        subject = parse_subject_dn(subject_dn)
 
         subject = parse_subject_dn(subject_dn)
         logger.info(f"Subject: {subject.rfc4514_string()}")
@@ -439,8 +570,34 @@ def issue_certificate(
     cert_info = get_certificate_info(certificate)
     logger.info("=" * 60)
     logger.info("Certificate issued successfully")
+    logger.info(f"Template: {template_name}")
+    logger.info(f"Subject: {cert_info['subject']}")
     logger.info(f"Serial: {cert_info['serial_number']}")
+    logger.info(f"Issuer: {cert_info['issuer']}")
+    logger.info(f"Valid: {cert_info['not_valid_before']} to {cert_info['not_valid_after']}")
+    if san_entries:
+        logger.info(f"SAN: {', '.join(san_entries)}")
+    logger.info(f"Certificate: {cert_path}")
     logger.info("=" * 60)
+
+    # Sprint 7: CT-log + аудит
+    try:
+        ct = CTLog(audit_root)
+        ct.append(certificate)
+    except Exception as e:
+        logger.warning(f"CT log append failed: {e}")
+
+    audit.audit(
+        operation="issue_certificate",
+        status="success",
+        message=f"Issued {template_name} certificate: {cert_info['subject']}",
+        metadata={
+            "serial": cert_info["serial_number"],
+            "subject": cert_info["subject"],
+            "template": template_name,
+            "san": san_entries,
+        }
+    )
 
     return serial_hex
 
@@ -596,4 +753,89 @@ def issue_ocsp_certificate(
     logger.info(f"  Cert: {cert_path}")
     logger.info(f"  Key:  {key_path}")
     logger.info("=" * 60)
+
+def compromise_certificate(
+    cert_path: Path,
+    out_dir: Path,
+    db_path: Path,
+    ca_passphrase: Optional[bytes] = None,
+    ca_cert_path: Optional[Path] = None,
+    ca_key_path: Optional[Path] = None,
+    reason: str = "keyCompromise",
+    logger: Optional[logging.Logger] = None,
+) -> dict:
+    if logger is None:
+        logger = logging.getLogger("micropki")
+
+    audit = AuditLogger(Path(out_dir))
+
+    cert = load_certificate(Path(cert_path))
+    serial_hex = format(cert.serial_number, "X")
+    pk_hash = certificate_public_key_hash(cert)
+
+    audit.audit(
+        operation="ca_compromise",
+        status="started",
+        message=f"Compromise simulation for {serial_hex}",
+        metadata={"serial": serial_hex, "reason": reason}
+    )
+
+    from .database import CertificateDatabase
+    db = CertificateDatabase(db_path)
+
+    cert_in_db = db.get_certificate(serial_hex)
+    if cert_in_db is None:
+        audit.audit(
+            operation="ca_compromise",
+            status="failure",
+            message=f"Certificate not found in DB: {serial_hex}",
+            metadata={"serial": serial_hex}
+        )
+        raise ValueError(f"Certificate {serial_hex} not found in database")
+
+    if cert_in_db["status"] != "revoked":
+        db.revoke_certificate(serial_hex, reason)
+
+    db.add_compromised_key(pk_hash, serial_hex, reason)
+
+    emergency_crl_path = None
+    if ca_cert_path is not None and ca_key_path is not None and ca_passphrase is not None:
+        try:
+            from .crl import CRLManager
+            issuer_dn = cert.issuer.rfc4514_string()
+            ca_name = "intermediate"
+            if "intermediate" not in issuer_dn.lower():
+                ca_name = "root"
+
+            crl_manager = CRLManager(Path(out_dir), logger)
+            revoked_list = db.get_revoked_by_issuer(issuer_dn)
+            emergency_crl_path = crl_manager.generate_and_save_crl(
+                ca_cert_path=ca_cert_path,
+                ca_key_path=ca_key_path,
+                ca_passphrase=ca_passphrase,
+                revoked_certs=revoked_list,
+                ca_name=ca_name,
+                next_update_days=7,
+            )
+            logger.info(f"Emergency CRL regenerated: {emergency_crl_path}")
+        except Exception as e:
+            logger.warning(f"Emergency CRL generation failed: {e}")
+
+    audit.audit(
+        operation="ca_compromise",
+        status="success",
+        message=f"Certificate {serial_hex} marked compromised",
+        metadata={
+            "serial": serial_hex,
+            "reason": reason,
+            "public_key_hash": pk_hash,
+            "emergency_crl": str(emergency_crl_path) if emergency_crl_path else None,
+        }
+    )
+
+    return {
+        "serial": serial_hex,
+        "public_key_hash": pk_hash,
+        "emergency_crl": str(emergency_crl_path) if emergency_crl_path else None,
+    }
 

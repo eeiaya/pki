@@ -36,6 +36,24 @@ secrets/
 logs/
 *.key.pem
 *.pass
+*.cert.pem
+*.csr.pem
+*.crl.pem
+
+# Audit (Sprint 7)
+audit/
+*.log
+ct.log
+chain.dat
+
+# Client artifacts (Sprint 6)
+app.cert.pem
+app.key.pem
+app.csr.pem
+cert.pem
+key.pem
+request.csr.pem
+evil.csr.pem
 
 # IDE
 .vscode/

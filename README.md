@@ -103,15 +103,15 @@ micropki ca issue-cert \
     --subject "CN=MicroPKI Code Signer" \
     --out-dir pki/pki1/certs
 ```
-## Спринт 3: База данных и репозиторий
-### Инициализация базы данных
+### Спринт 3: База данных и репозиторий
+#### Инициализация базы данных
 
 ```
 micropki db init --db-path pki/pki1/certificates.db
 ```
 При выпуске сертификатов они автоматически сохраняются в базу данных.
 Дополнительные флаги не требуются.
-### Просмотр списка сертификатов
+#### Просмотр списка сертификатов
 ```
 # Таблица (по умолчанию)
 micropki ca list-certs
@@ -139,7 +139,7 @@ Serial                                     Subject                             S
 69C3CA6E4B1A3F28                           CN=root ca                          valid      root_ca         2036-03-23
 ===============================================================================================================
 ```
-### Просмотр конкретного сертификата 
+#### Просмотр конкретного сертификата 
 ```
 # По серийному номеру (таблица)
 micropki ca show-cert 69C3CA912F77F1EB
@@ -162,15 +162,15 @@ Template:        code_signing
 Created At:      2026-03-25T11:44:17.310524+00:00
 ======================================================================
 ```
-### Экспорт сертификата из базы данных
+#### Экспорт сертификата из базы данных
 ```
 micropki db export 69C3CA912F77F1EB -o exported_cert.pem
 ```
-### Статистика базы данных
+#### Статистика базы данных
 ```
 micropki db stats
 ```
-Пример вывода:
+##### Пример вывода:
 ```
 ==================================================
 DATABASE STATISTICS
@@ -188,11 +188,11 @@ By Template:
   code_signing    1
 ==================================================
 ```
-### Запуск HTTP-сервера репозитория
+#### Запуск HTTP-сервера репозитория
 ```
 micropki repo serve --host 127.0.0.1 --port 8080
 ```
-Пример вывода:
+##### Пример вывода:
 ```
 ============================================================
 Starting MicroPKI Certificate Repository Server
@@ -208,7 +208,7 @@ API Docs:        http://127.0.0.1:8080/docs
 Press Ctrl+C to stop.
 ============================================================
 ```
-### Примеры API-запросов (curl)
+#### Примеры API-запросов (curl)
 ```
 # Получить сертификат по серийному номеру
 curl http://localhost:8080/certificate/69C3CA912F77F1EB
@@ -241,7 +241,7 @@ curl "http://localhost:8080/search?q=example.com"
 curl http://localhost:8080/crl
 # Ответ: 501 Not Implemented
 ```
-### Интерактивная документация API (Swagger UI)
+#### Интерактивная документация API (Swagger UI)
 После запуска сервера откройте в браузере:
 ```
 http://127.0.0.1:8080/docs
@@ -252,9 +252,9 @@ Swagger UI позволяет:
 - Тестировать запросы прямо в браузере
 - Скачивать сертификаты
 
-## Спринт 4: Отзыв сертификатов и CRL
+### Спринт 4: Отзыв сертификатов и CRL
 
-### Отзыв сертификата
+#### Отзыв сертификата
 
 ```bash
 # Посмотреть список сертификатов
@@ -269,7 +269,7 @@ micropki ca revoke 69C3CA5D7A53717F --reason superseded --force
 # Проверить статус
 micropki ca check-revoked 69C3CA5D7A53717F
 ```
-### Поддерживаемые причины отзыва (RFC 5280):
+#### Поддерживаемые причины отзыва (RFC 5280):
 
 | Код | 	Причина	   | Описание | 
 |-|-------------|---|
@@ -284,7 +284,7 @@ micropki ca check-revoked 69C3CA5D7A53717F
 |9|	privilegeWithdrawn|	Отзыв привилегий|
 |10|	aACompromise|	Компрометация AA|
 
-### Генерация CRL
+#### Генерация CRL
 ```
 # CRL для корневого CA
 micropki ca gen-crl --ca root --ca-pass-file secrets/ca.pass
@@ -298,7 +298,7 @@ micropki ca gen-crl --ca intermediate --ca-pass-file secrets/ca.pass --next-upda
 # Сохранить в произвольный файл
 micropki ca gen-crl --ca root --ca-pass-file secrets/ca.pass --out-file ./backup/root.crl.pem
 ```
-### Получение CRL через API
+#### Получение CRL через API
 ```
 # CRL промежуточного CA (по умолчанию)
 curl http://localhost:8080/crl
@@ -310,10 +310,10 @@ curl http://localhost:8080/crl?ca=root
 curl http://localhost:8080/crl/intermediate.crl
 curl http://localhost:8080/crl/root.crl
 ```
-### 
-## Спринт 5: OCSP-ответчик
+ 
+### Спринт 5: OCSP-ответчик
 
-### Выпуск сертификата OCSP-ответчика
+#### Выпуск сертификата OCSP-ответчика
 
  Сертификат OCSP-ответчика выпускается промежуточным CA и имеет специальное расширение Extended Key Usage = OCSPSigning.
 
@@ -335,7 +335,7 @@ micropki ca issue-ocsp-cert \
 * ocsp.key.pem — приватный ключ без шифрования (нужно для автозагрузки сервером)
 
 Важно: приватный ключ OCSP-ответчика хранится без пароля. Защищайте его правами доступа файловой системы.
-### Запуск OCSP-ответчика
+#### Запуск OCSP-ответчика
 OCSP-ответчик работает как отдельный HTTP-сервер на порту 8081:
 ```bash
 micropki ocsp serve \
@@ -360,7 +360,7 @@ Cache TTL: 60s
 Press Ctrl+C to stop.
 ============================================================
 ```
-### Эндпоинт OCSP
+#### Эндпоинт OCSP
 | Параметр             | Значение |
 |----------------------|----------|
 | Метод                | POST     |
@@ -380,7 +380,7 @@ nonce — это случайное значение, которое клиен�
 Если в запросе nonce есть — он должен быть в ответе.
 Если в запросе nonce нет — ответчик НЕ добавляет его в ответ.
 
-### Проверка работы OCSP
+#### Проверка работы OCSP
 После запуска ответчика проверки можно делать через Python.
 ##### Проверка статуса GOOD
 ```PowerShell
@@ -413,7 +413,7 @@ print("Cert status:", result.certificate_status)
 ```text
 Cert status: OCSPCertStatus.GOOD
 ```
-### Проверка статуса REVOKED
+#### Проверка статуса REVOKED
 ```PowerShell
 @'
 from urllib.request import Request, urlopen
@@ -442,7 +442,7 @@ print("Revocation time:", result.revocation_time_utc)
 print("Reason:         ", result.revocation_reason)
 '@ | python -
 ```
-Ожидаемый вывод:
+##### Ожидаемый вывод:
 ```text
 Cert status:     OCSPCertStatus.REVOKED
 Revocation time: 2026-...
@@ -480,11 +480,11 @@ resp_nonce = result.extensions.get_extension_for_class(x509.OCSPNonce).value.non
 print("Match:", nonce == resp_nonce)
 '@ | python -
 ```
-Ожидаемый вывод:
+##### Ожидаемый вывод:
 ```text
 Match: True
 ```
-### Проверка через OpenSSL
+#### Проверка через OpenSSL
 Если установлен OpenSSL, можно использовать стандартный клиент:
 ```bash
 # Запрос статуса сертификата
@@ -503,9 +503,9 @@ openssl ocsp \
     -CAfile pki/pki1/certs/ca.cert.pem \
     -VAfile pki/pki1/certs/ocsp.cert.pem
 ```
- ## Спринт 6: Клиентские инструменты и проверка цепочки
+### Спринт 6: Клиентские инструменты и проверка цепочки
 
-### Генерация CSR
+#### Генерация CSR
 
 ```bash
 micropki client gen-csr \
@@ -521,7 +521,7 @@ micropki client gen-csr \
 
 * app.key.pem — приватный ключ (без шифрования, 0o600)
 * app.csr.pem — запрос на подпись сертификата (PKCS#10)
-### Запрос сертификата через API
+#### Запрос сертификата через API
 ```bash
 micropki client request-cert \
     --csr ./app.csr.pem \
@@ -534,7 +534,7 @@ micropki client request-cert \
 * Сервер репозитория должен быть запущен (micropki repo serve)
 * API-ключ передаётся в заголовке X-API-Key (по умолчанию changeme)
 
-### Проверка цепочки сертификатов
+#### Проверка цепочки сертификатов
 ```bash
 # Базовая проверка (подписи + сроки)
 micropki client validate \
@@ -575,7 +575,7 @@ micropki client validate \
 * ExtendedKeyUsage (опционально через --check-eku)
 * Статус отзыва (CRL и/или OCSP)
 
-### Проверка статуса отзыва
+#### Проверка статуса отзыва
 ```bash
 # Автоматически (OCSP из AIA → fallback на CRL из CDP)
 micropki client check-status \
@@ -604,7 +604,7 @@ micropki client check-status \
 * REVOKED — отозван (с датой и причиной)
 * UNKNOWN — не удалось определить
 
-### Подпись внешнего CSR через CA
+#### Подпись внешнего CSR через CA
 ```bash
 micropki ca issue-cert \
     --ca-cert ./pki/pki1/certs/intermediate.cert.pem \
@@ -620,6 +620,158 @@ micropki ca issue-cert \
 * Проверяется подпись CSR
 * Отклоняются CSR с CA=TRUE
 * Ключ не генерируется (используется из CSR)
+
+## Спринт 7: Аудит, политики безопасности и средства защиты
+
+### Система аудита
+
+Все критичные операции (выпуск, отзыв, компрометация, инициализация CA) автоматически логируются в:
+- `pki/pki1/audit/audit.log` — NDJSON формат с хеш-цепочкой SHA-256
+- `pki/pki1/audit/chain.dat` — последний хеш цепочки для быстрой верификации
+- `pki/pki1/audit/ct.log` — симуляция Certificate Transparency
+
+Каждая запись содержит хеш предыдущей записи (`prev_hash`) и собственный хеш (`hash`), что обеспечивает криптографическую целостность.
+
+#### Просмотр журнала аудита
+
+```bash
+# Все записи (таблица)
+micropki audit query
+
+# Фильтр по операции
+micropki audit query --operation issue_certificate
+
+# Фильтр по уровню
+micropki audit query --level AUDIT
+
+# Фильтр по серийному номеру
+micropki audit query --serial 6A1C2FB87A3E4172
+
+# Фильтр по времени
+micropki audit query --from 2026-05-31T00:00:00Z --to 2026-05-31T23:59:59Z
+
+# JSON-формат
+micropki audit query --format json
+
+# CSV-формат
+micropki audit query --format csv
+
+# С проверкой целостности
+micropki audit query --verify
+```
+#### Проверка целостности аудита
+```Bash
+micropki audit verify
+```
+#### Вывод:
+
+```text
+✓ Audit log integrity OK: pki\pki1\audit\audit.log
+```
+#### Если файл был подделан:
+
+```text
+✗ Audit log integrity FAILED
+  First bad line: 2
+  Reason: Entry hash mismatch at line 2: expected ..., got ...
+```
+### Certificate Transparency (CT) log
+#### При каждом выпуске сертификата запись добавляется в ct.log в формате:
+
+```text
+
+<timestamp>  <serial>  <subject>  <sha256-fingerprint>  <issuer>
+```
+#### Проверка наличия сертификата:
+
+```Bash
+micropki audit ct-verify 6A1C2FB87A3E4172
+```
+### Политики безопасности
+##### Все операции выпуска сертификатов проверяются на соответствие политикам. При нарушении выпуск блокируется и фиксируется в аудите.
+
+#### Размер ключа (POL-3)
+
+| Тип             | RSA | ECC |
+|-----------------|-----|-----|
+| Root CA         | ≥ 4096 бит | ≥ P-384 |
+| Intermediate CA | ≥ 3072 бит | ≥ P-384 |
+| End-entity      | ≥ 2048 бит | ≥ P-256 |
+
+#### Срок действия (POL-4)
+| Тип     | Максимум |
+|---------|----------|
+| Root CA | 3650 дней (10 лет) |
+| Intermediate CA | 1825 дней (5 лет) |
+|  End-entity  | 365 дней (1 год) |
+
+#### SAN (POL-5)
+| Шаблон | Разрешенные типы | Запрещено |
+|-------|----------|---------|
+| server|  dns, ip | email, uri, wildcard (*.example.com) |
+| client|  email, dns (требуется email)| ip, uri |
+| code_signing | dns, uri | ip, email|
+
+#### Алгоритм подписи (POL-6)
+* SHA-1 отклоняется
+* RSA: только SHA-256/384/512
+* ECC P-256: только SHA-256
+* ECC P-384: только SHA-384
+
+#### Длина пути CA (POL-7)
+* Root CA: без ограничения
+* Intermediate CA: pathLen = 0 (не может выпускать другие CA)
+
+### Примеры нарушений политик
+```bash
+# Слишком длинный срок (max 365)
+micropki ca issue-cert --validity-days 400 ... 
+# ✗ Error: End-entity certificate validity cannot exceed 365 days
+
+# Wildcard SAN
+micropki ca issue-cert --template server --san "dns:*.example.com" ...
+# ✗ Error: Wildcard SAN entries are forbidden by default
+
+# Email SAN для server
+micropki ca issue-cert --template server --san "email:admin@example.com" ...
+# ✗ Error: SAN type 'email' is not allowed for template 'server'
+```
+### Симуляция компрометации ключа
+##### При компрометации закрытого ключа:
+
+* Сертификат немедленно отзывается с причиной keyCompromise
+* Публичный ключ заносится в таблицу compromised_keys
+* Генерируется экстренный CRL
+* Будущие CSR с этим ключом блокируются
+```bash
+micropki ca compromise \
+    --cert pki/pki1/certs/audit-test.com.cert.pem \
+    --reason keyCompromise \
+    --force \
+    --ca-pass-file secrets/ca.pass
+```
+##### Вывод:
+```text
+✓ Certificate marked as compromised
+  Serial:           6A1C2FB87A3E4172
+  Public key hash:  af3c8d9e1b2f...
+  Emergency CRL:    pki\pki1\crl\intermediate.crl.pem
+```
+##### После этого попытка использовать тот же ключ в новом CSR будет отклонена:
+```text
+✗ Error: Public key is marked as compromised; refusing to issue
+```
+### База данных: таблица compromised_keys
+```sql
+CREATE TABLE compromised_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_key_hash TEXT UNIQUE NOT NULL,
+    certificate_serial TEXT NOT NULL,
+    compromise_date TEXT NOT NULL,
+    compromise_reason TEXT NOT NULL,
+    FOREIGN KEY (certificate_serial) REFERENCES certificates(serial_hex)
+);
+```
 
 ## Тестирование
 ### Модульные тесты
@@ -915,6 +1067,21 @@ pytest tests/test_sprint6.py -v
 * Fallback логику OCSP → CRL
 * Интеграционный полный цикл (CSR → cert → validate → revoke)
 
+### Тесты спринта 7
+```Bash
+pytest tests/test_sprint7.py -v
+# Результат: 54 passed
+````
+##### Тесты покрывают:
+
+* Хеш-цепочку аудита (создание, связывание, верификация)
+* Обнаружение подделки и пропущенных записей
+* Все политики (key size, validity, SAN, signature algorithm, pathLen)
+* Симуляцию компрометации ключа
+* Блокировку CSR со скомпрометированным ключом
+* Запись в CT log при выпуске
+* Целостность аудита после полного workflow
+
 ## Структура выходных файлов
 ```text
 
@@ -936,6 +1103,10 @@ pki/pki1/
 ├── crl/                             
 │   ├── root.crl.pem                
 │   └── intermediate.crl.pem
+├── audit/                          
+│   ├── audit.log                   # NDJSON журнал с хеш-цепочкой
+│   ├── chain.dat                   # последний хеш
+│   └── ct.log   
 ├── csrs/
 │   └── intermediate.csr.pem        # CSR промежуточного CA
 ├── certificates.db                  # база данных SQLite
@@ -964,13 +1135,19 @@ pki/
 │   ├── client.py                 # клиентские функции 
 │   ├── validation.py             # проверка цепочки 
 │   ├── revocation_check.py       # проверка отзыва CRL/OCSP 
+│   ├── audit.py                  # система аудита 
+│   ├── policy.py                 # политики безопасности 
+│   ├── ratelimit.py              # rate limiting 
+│   ├── transparency.py           # CT log 
+│   ├── compromise.py             # компрометация ключей 
 │   └── server.py                 # REST API сервер (FastAPI)
 ├── tests/
 │   ├── test_ca.py                # тесты спринтов 1-2 (39 тестов)
 │   ├── test_sprint3.py           # тесты спринта 3 (18 тестов)
 │   ├── test_sprint4.py           # тесты спринта 4 (18 тестов)
 │   ├── test_sprint5.py 
-│   └── test_sprint6.py           # тесты спринта 6 (32 теста)
+│   ├── test_sprint6.py           # тесты спринта 6 (32 теста)
+│   └── test_sprint7.py           # тесты спринта 7 (54 теста)
 ├── pki/pki1/                     # выходные файлы PKI (в .gitignore)
 ├── secrets/                      # пароли (в .gitignore)
 ├── logs/                         # логи (в .gitignore)
@@ -1065,6 +1242,15 @@ CREATE INDEX idx_ca_subject ON crl_metadata(ca_subject);
 | `client request-cert` | Запрос сертификата у CA | 6 |
 | `client validate` | Проверка цепочки сертификатов | 6 |
 | `client check-status` | Проверка статуса отзыва (OCSP→CRL) | 6 |
+
+### Аудит и безопасность
+
+| Команда | Описание | Спринт |
+|---------|----------|--------|
+| `ca compromise --cert <path>` | Симуляция компрометации ключа | 7 |
+| `audit query` | Поиск записей аудита (с фильтрами) | 7 |
+| `audit verify` | Проверка целостности хеш-цепочки | 7 |
+| `audit ct-verify <serial>` | Проверка наличия в CT-логе | 7 |
 
 ### HTTP API эндпоинты
 

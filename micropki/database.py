@@ -307,6 +307,18 @@ class CertificateDatabase:
             )
         ''')
 
+        # === SPRINT 7: Таблица скомпрометированных ключей (DB-10) ===
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS compromised_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_key_hash TEXT UNIQUE NOT NULL,
+                certificate_serial TEXT NOT NULL,
+                compromise_date TEXT NOT NULL,
+                compromise_reason TEXT NOT NULL,
+                FOREIGN KEY (certificate_serial) REFERENCES certificates(serial_hex)
+            )
+        ''')
+
         # Индексы
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_serial_hex 
@@ -347,6 +359,11 @@ class CertificateDatabase:
             CREATE INDEX IF NOT EXISTS idx_ca_subject 
                    ON crl_metadata(ca_subject)
                ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_compromised_pubkey
+            ON compromised_keys(public_key_hash)
+        ''')
 
         conn.commit()
         conn.close()
@@ -497,3 +514,50 @@ class CertificateDatabase:
 
         conn.commit()
         conn.close()
+
+    # ============================================================
+    # SPRINT 7: Compromised keys
+    # ============================================================
+
+    def add_compromised_key(
+        self,
+        public_key_hash: str,
+        certificate_serial: str,
+        reason: str = 'keyCompromise'
+    ) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        compromise_date = datetime.now(timezone.utc).isoformat()
+
+        try:
+            cursor.execute('''
+                INSERT INTO compromised_keys
+                    (public_key_hash, certificate_serial, compromise_date, compromise_reason)
+                VALUES (?, ?, ?, ?)
+            ''', (public_key_hash, certificate_serial, compromise_date, reason))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def is_key_compromised(self, public_key_hash: str) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT 1 FROM compromised_keys WHERE public_key_hash = ?',
+            (public_key_hash,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+
+    def list_compromised_keys(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM compromised_keys ORDER BY compromise_date DESC')
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
