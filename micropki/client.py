@@ -279,3 +279,91 @@ def setup_client_logger(log_file: Optional[Path] = None) -> logging.Logger:
     logger.addHandler(handler)
 
     return logger
+
+def client_sign_file(
+    file_path: Path,
+    key_path: Path,
+    out_sig: Path,
+    logger: Optional[logging.Logger] = None
+) -> None:
+    log = logger or logging.getLogger('micropki.client')
+
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives.asymmetric import padding as _padding, ec as _ec, rsa as _rsa
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise ValueError(f"File to sign not found: {file_path}")
+
+    key_path = Path(key_path)
+    if not key_path.exists():
+        raise ValueError(f"Private key not found: {key_path}")
+
+    data = file_path.read_bytes()
+    private_key = load_pem_private_key(key_path.read_bytes(), password=None)
+
+    if isinstance(private_key, _rsa.RSAPrivateKey):
+        signature = private_key.sign(
+            data,
+            _padding.PKCS1v15(),
+            _hashes.SHA256()
+        )
+    elif isinstance(private_key, _ec.EllipticCurvePrivateKey):
+        signature = private_key.sign(data, _ec.ECDSA(_hashes.SHA256()))
+    else:
+        raise ValueError("Unsupported key type for signing")
+
+    out_sig = Path(out_sig)
+    out_sig.parent.mkdir(parents=True, exist_ok=True)
+    out_sig.write_bytes(signature)
+
+    log.info(f"Signed: {file_path} -> {out_sig}")
+    log.info(f"Signature size: {len(signature)} bytes")
+
+
+def client_verify_file(
+    file_path: Path,
+    cert_path: Path,
+    sig_path: Path,
+    logger: Optional[logging.Logger] = None
+) -> bool:
+    log = logger or logging.getLogger('micropki.client')
+
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives.asymmetric import padding as _padding, ec as _ec, rsa as _rsa
+    from cryptography.exceptions import InvalidSignature
+
+    file_path = Path(file_path)
+    cert_path = Path(cert_path)
+    sig_path = Path(sig_path)
+
+    if not file_path.exists():
+        raise ValueError(f"File not found: {file_path}")
+    if not cert_path.exists():
+        raise ValueError(f"Certificate not found: {cert_path}")
+    if not sig_path.exists():
+        raise ValueError(f"Signature file not found: {sig_path}")
+
+    data = file_path.read_bytes()
+    signature = sig_path.read_bytes()
+    cert = load_certificate(cert_path)
+    public_key = cert.public_key()
+
+    try:
+        if isinstance(public_key, _rsa.RSAPublicKey):
+            public_key.verify(
+                signature,
+                data,
+                _padding.PKCS1v15(),
+                _hashes.SHA256()
+            )
+        elif isinstance(public_key, _ec.EllipticCurvePublicKey):
+            public_key.verify(signature, data, _ec.ECDSA(_hashes.SHA256()))
+        else:
+            raise ValueError("Unsupported public key type")
+        log.info("Signature is VALID")
+        return True
+    except InvalidSignature:
+        log.warning("Signature is INVALID")
+        return False

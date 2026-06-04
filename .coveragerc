@@ -1,0 +1,11 @@
+[run]
+source = micropki
+omit =
+    micropki/cli.py
+    micropki/server.py
+    micropki/ocsp_responder.py
+    micropki/ratelimit.py`
+    micropki/client.py
+    micropki/revocation_check.py
+    micropki/chain.py
+    micropki/serial.py

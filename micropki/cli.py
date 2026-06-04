@@ -502,6 +502,57 @@ def client_check_status_command(args):
         print(f"\n✗ Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+def client_sign_command(args):
+    from .client import client_sign_file, setup_client_logger
+
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_client_logger(log_file=log_file)
+
+    try:
+        client_sign_file(
+            file_path=Path(args.file),
+            key_path=Path(args.key),
+            out_sig=Path(args.out_sig),
+            logger=logger
+        )
+        print(f"\n✓ File signed", file=sys.stderr)
+        print(f"  File:      {args.file}", file=sys.stderr)
+        print(f"  Signature: {args.out_sig}", file=sys.stderr)
+    except Exception as e:
+        logger.error(f"Sign failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def client_verify_command(args):
+    from .client import client_verify_file, setup_client_logger
+
+    log_file = Path(args.log_file) if args.log_file else None
+    logger = setup_client_logger(log_file=log_file)
+
+    try:
+        valid = client_verify_file(
+            file_path=Path(args.file),
+            cert_path=Path(args.cert),
+            sig_path=Path(args.sig),
+            logger=logger
+        )
+
+        if valid:
+            print(f"\n✓ Signature VALID", file=sys.stderr)
+            print(f"  File:      {args.file}", file=sys.stderr)
+            print(f"  Signer:    {args.cert}", file=sys.stderr)
+            sys.exit(0)
+        else:
+            print(f"\n✗ Signature INVALID", file=sys.stderr)
+            sys.exit(2)
+
+    except Exception as e:
+        logger.error(f"Verify failed: {e}")
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 # ============================================================
 # SPRINT 7: Audit + Compromise commands
 # ============================================================
@@ -1108,6 +1159,20 @@ def main():
     p.add_argument('--ocsp-url', help='Override OCSP responder URL')
     p.add_argument('--log-file')
 
+    # client sign
+    p = client_sub.add_parser('sign', help='Sign a file with code-signing private key')
+    p.add_argument('--file', required=True, help='File to sign')
+    p.add_argument('--key', required=True, help='Private key (PEM, unencrypted)')
+    p.add_argument('--out-sig', default='./signature.sig', help='Output signature file')
+    p.add_argument('--log-file')
+
+    # client verify
+    p = client_sub.add_parser('verify', help='Verify file signature')
+    p.add_argument('--file', required=True, help='File to verify')
+    p.add_argument('--cert', required=True, help='Signer certificate (PEM)')
+    p.add_argument('--sig', required=True, help='Signature file')
+    p.add_argument('--log-file')
+
     # ============================================================
     # SPRINT 7: audit commands
     # ============================================================
@@ -1257,6 +1322,10 @@ def main():
             client_validate_command(args)
         elif args.client_command == 'check-status':
             client_check_status_command(args)
+        elif args.client_command == 'sign':
+            client_sign_command(args)
+        elif args.client_command == 'verify':
+            client_verify_command(args)
         else:
             client_parser.print_help()
             sys.exit(1)

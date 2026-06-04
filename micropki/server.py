@@ -314,11 +314,13 @@ def create_app(db_path: Path, ca_certs_dir: Path) -> FastAPI:
             template: str = Query("server", description="Template: server, client, code_signing"),
             x_api_key: Optional[str] = Header(None, alias="X-API-Key")
     ):
+        client_ip = request.client.host if request.client else "unknown"
+
         # Простая проверка API-ключа
         EXPECTED_API_KEY = os.environ.get("MICROPKI_API_KEY", "changeme")
         if x_api_key != EXPECTED_API_KEY:
             http_logger.logger.warning(
-                f"Unauthorized /request-cert attempt from {request.client.host if request.client else 'unknown'}"
+                f"Unauthorized /request-cert attempt from {client_ip}"
             )
             raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
@@ -358,42 +360,56 @@ def create_app(db_path: Path, ca_certs_dir: Path) -> FastAPI:
 
         # Выпускаем сертификат
         try:
-            import tempfile
             import logging as _logging
             from .ca import issue_certificate
-            from .crypto_utils import load_certificate as _load_cert
+            from fastapi.responses import Response as _Response
 
             ca_logger = _logging.getLogger('micropki.api')
 
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                tmp_path = Path(tmp_dir)
+            serial_hex = issue_certificate(
+                ca_cert_path=ca_cert_path,
+                ca_key_path=ca_key_path,
+                ca_passphrase=ca_passphrase,
+                template_name=template,
+                subject_dn="",
+                san_entries=[],
+                out_dir=ca_certs_dir,
+                validity_days=365,
+                logger=ca_logger,
+                db_path=db_path,
+                csr_pem=body
+            )
 
-                serial_hex = issue_certificate(
-                    ca_cert_path=ca_cert_path,
-                    ca_key_path=ca_key_path,
-                    ca_passphrase=ca_passphrase,
-                    template_name=template,
-                    subject_dn="",  # будет переопределён CSR
-                    san_entries=[],
-                    out_dir=tmp_path,
-                    validity_days=365,
-                    logger=ca_logger,
-                    db_path=db_path,
-                    csr_pem=body
-                )
+            cert_data = db.get_certificate(serial_hex)
+            if not cert_data:
+                raise HTTPException(status_code=500, detail="Certificate not saved to DB")
 
-                # Возвращаем сертификат из БД
-                cert_data = db.get_certificate(serial_hex)
-                if not cert_data:
-                    raise HTTPException(status_code=500, detail="Certificate not saved to DB")
+            http_logger.logger.info(
+                f"CSR signed: client={client_ip} serial={serial_hex} template={template}"
+            )
 
-                http_logger.logger.info(
-                    f"CSR signed: client={request.client.host if request.client else 'unknown'} "
-                    f"serial={serial_hex} template={template}"
-                )
+            return _Response(
+                content=cert_data['cert_pem'],
+                media_type="application/x-pem-file",
+                status_code=201,
+                headers={
+                    'X-Certificate-Serial': serial_hex,
+                    'Content-Disposition': 'attachment; filename="cert.pem"'
+                }
+            )
 
-                from fastapi.responses import Response as _Response
-                return _Response(
+        except ValueError as e:
+            http_logger.logger.error(f"CSR rejected from {client_ip}: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception as e:
+            http_logger.logger.error(f"CSR signing failed from {client_ip}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to issue certificate: {e}")
+
+
+            from fastapi.responses import Response as _Response
+            return _Response(
                     content=cert_data['cert_pem'],
                     media_type="application/x-pem-file",
                     status_code=201,

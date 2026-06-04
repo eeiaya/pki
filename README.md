@@ -29,7 +29,16 @@ pip install -r requirements.txt
 # Установите проект в режиме разработки
 pip install -e .
 ```
-
+## Дополнительная документация
+* demo/DEMO.md — пошаговое описание автоматизированной демонстрации
+* docs/ARCHITECTURE.md — схема архитектуры (Mermaid) и описание компонентов
+* docs/SECURITY.md — аспекты безопасности, threat model, ограничения
+* docs/API.md — полный справочник по HTTP API
+## Быстрая демонстрация
+```Bash
+python demo/demo.py
+````
+Скрипт развернёт полную PKI во временной директории и проведёт все 25 шагов: создание CA → выпуск сертификатов → запуск серверов → валидация → отзыв → подпись кода → проверка аудита.
 ## Использование
 ### Спринт 1: Корневой CA
 #### Инициализация корневого CA (RSA-4096)
@@ -772,14 +781,93 @@ CREATE TABLE compromised_keys (
     FOREIGN KEY (certificate_serial) REFERENCES certificates(serial_hex)
 );
 ```
+## Спринт 8: Подпись кода, демо и финальная интеграция
+### Подпись и проверка файлов
+```Bash
+# Подпись файла приватным ключом code-signing сертификата
+micropki client sign \
+    --file ./script.sh \
+    --key pki/pki1/certs/Demo_Code_Signer.key.pem \
+    --out-sig ./script.sh.sig
+
+# Проверка подписи
+micropki client verify \
+    --file ./script.sh \
+    --cert pki/pki1/certs/Demo_Code_Signer.cert.pem \
+    --sig ./script.sh.sig
+```
+Вывод при валидной подписи:
+```text
+✓ Signature VALID
+  File:      ./script.sh
+  Signer:    pki/pki1/certs/Demo_Code_Signer.cert.pem
+```
+При модификации файла:
+```text
+✗ Signature INVALID
+```
+Альтернативно с OpenSSL:
+
+```Bash
+openssl dgst -sha256 -sign code_signing.key.pem -out script.sh.sig script.sh
+openssl dgst -sha256 -verify <(openssl x509 -in code_signing.cert.pem -pubkey -noout) \
+    -signature script.sh.sig script.sh
+````
+### TLS-демонстрация
+Сертификат, выпущенный MicroPKI, можно использовать для реального TLS-соединения:
+
+```Bash
+# Запуск HTTPS-сервера с выпущенным сертификатом
+openssl s_server \
+    -accept 8443 \
+    -cert pki/pki1/certs/example.com.cert.pem \
+    -key pki/pki1/certs/example.com.key.pem \
+    -CAfile pki/pki1/certs/intermediate.cert.pem
+
+# Клиент подключается с доверием к корневому CA
+openssl s_client \
+    -connect localhost:8443 \
+    -CAfile pki/pki1/certs/ca.cert.pem \
+    -showcerts
+```
+После отзыва сертификата и регенерации CRL клиент с проверкой отзыва (-crl_check) должен получить ошибку.
+
+### Демонстрационный скрипт
+Автоматизированный сценарий из 25 шагов, охватывающий все возможности PKI:
+
+```Bash
+python demo/demo.py
+````
+Подробное описание шагов: demo/DEMO.md
 
 ## Тестирование
 ### Модульные тесты
 ```
 pytest tests/ -v
 
-# Результат: 39 passed in 8.16s
+# Результат: 211 passed
 ```
+С покрытием
+```Bash
+pytest tests/ --cov=micropki --cov-report=term-missing
+# Coverage: 80%
+```
+### Производительность
+```Bash
+pytest tests/test_sprint8.py -v -s -m perf
+```
+### Тесты по спринтам
+|Файл|	Описание|	Тестов|
+|------------------|-----------|--------|
+|test_ca.py|	Спринты 1-2 (Root + Intermediate CA, выпуск)|	39|
+|test_sprint3.py|	БД и репозиторий|	18|
+|test_sprint4.py|	Отзыв и CRL|	18|
+|test_sprint5.py|	OCSP|	30|
+|test_sprint6.py|	Клиент и валидация|	32|
+|test_sprint7.py|	Аудит и политики|	54|
+|test_sprint8.py|	Edge cases + perf + code signing|	20|
+
+
 ### TEST-1: Просмотр сертификата
 ```
 openssl x509 -in pki/pki1/certs/ca.cert.pem -text -noout
@@ -1148,11 +1236,20 @@ pki/
 │   ├── test_sprint5.py 
 │   ├── test_sprint6.py           # тесты спринта 6 (32 теста)
 │   └── test_sprint7.py           # тесты спринта 7 (54 теста)
+├── demo/
+│   ├── demo.py                   # автоматизированный демо-скрипт (25 шагов)
+│   └── DEMO.md                   # пошаговое описание демо
+├── docs/
+│   ├── ARCHITECTURE.md           # компонентная диаграмма (Mermaid)
+│   ├── SECURITY.md               # аспекты безопасности
+│   └── API.md                    # справочник HTTP API
 ├── pki/pki1/                     # выходные файлы PKI (в .gitignore)
 ├── secrets/                      # пароли (в .gitignore)
 ├── logs/                         # логи (в .gitignore)
 ├── .gitignore
+├── .coveragerc
 ├── requirements.txt
+├── pytest.ini
 ├── setup.py
 └── README.md
 ```
@@ -1190,7 +1287,33 @@ CREATE TABLE crl_metadata (
 );
 
 CREATE INDEX idx_ca_subject ON crl_metadata(ca_subject);
+
+CREATE TABLE compromised_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_key_hash TEXT UNIQUE NOT NULL,
+    certificate_serial TEXT NOT NULL,
+    compromise_date TEXT NOT NULL,
+    compromise_reason TEXT NOT NULL,
+    FOREIGN KEY (certificate_serial) REFERENCES certificates(serial_hex)
+);
+
+CREATE INDEX idx_compromised_pubkey ON compromised_keys(public_key_hash);
 ```
+## Аспекты безопасности
+MicroPKI — учебный проект. Не использовать в production без существенных доработок.
+
+##### Основные ограничения:
+
+* Закрытые ключи конечных сертификатов хранятся незашифрованными
+* Парольные фразы CA читаются из файлов
+* OCSP-ответчик работает по HTTP без TLS
+* Rate limiting базовый, не защищает от DDoS
+* Аудит-журнал не подписан, только хеш-цепочка
+* Certificate Transparency только симулируется
+* Нет интеграции с HSM
+* Аутентификация API через единый shared secret
+
+Полное обсуждение, threat model и рекомендации: docs/SECURITY.md.
 
 # Сводная таблица команд MicroPKI
 
@@ -1198,18 +1321,19 @@ CREATE INDEX idx_ca_subject ON crl_metadata(ca_subject);
 
 ### Управление CA
 
-| Команда | Описание | Спринт |
-|---------|----------|--------|
-| `ca init` | Инициализация Root CA | 1 |
-| `ca issue-intermediate` | Создание Intermediate CA | 2 |
-| `ca issue-cert` | Выпуск конечного сертификата | 2 |
-| `ca issue-cert --csr` | Подпись внешнего CSR | 6 |
-| `ca issue-ocsp-cert` | Выпуск OCSP-сертификата | 5 |
-| `ca revoke <serial>` | Отзыв сертификата | 4 |
-| `ca gen-crl` | Генерация CRL | 4 |
-| `ca check-revoked <serial>` | Проверка статуса отзыва | 4 |
-| `ca list-certs` | Список сертификатов | 3 |
-| `ca show-cert <serial>` | Показать сертификат | 3 |
+| Команда                     | Описание                       | Спринт |
+|-----------------------------|--------------------------------|--------|
+| `ca init`                   | Инициализация Root CA          | 1 |
+| `ca issue-intermediate`     | Создание Intermediate CA       | 2 |
+| `ca issue-cert`             | Выпуск конечного сертификата   | 2 |
+| `ca issue-cert --csr`       | Подпись внешнего CSR           | 6 |
+| `ca issue-ocsp-cert`        | Выпуск OCSP-сертификата        | 5 |
+| `ca revoke <serial>`        | Отзыв сертификата              | 4 |
+| `ca gen-crl`                | Генерация CRL                  | 4 |
+| `ca check-revoked <serial>` | Проверка статуса отзыва        | 4 |
+| ca compromise --cert <path> | 	Симуляция компрометации ключа | 	7                           |
+| `ca list-certs`             | Список сертификатов            | 3 |
+| `ca show-cert <serial>`     | Показать сертификат            | 3 |
 
 ### Работа с базой данных
 
@@ -1242,7 +1366,8 @@ CREATE INDEX idx_ca_subject ON crl_metadata(ca_subject);
 | `client request-cert` | Запрос сертификата у CA | 6 |
 | `client validate` | Проверка цепочки сертификатов | 6 |
 | `client check-status` | Проверка статуса отзыва (OCSP→CRL) | 6 |
-
+|client sign|	Подпись файла|	8|
+|client verify|	Проверка подписи файла|	8|
 ### Аудит и безопасность
 
 | Команда | Описание | Спринт |
@@ -1268,3 +1393,11 @@ CREATE INDEX idx_ca_subject ON crl_metadata(ca_subject);
 | `GET` | `/crl/{ca_name}.crl` | Альтернативный путь CRL | 4 |
 | `POST` | `/ocsp` | OCSP-запрос | 5 |
 | `POST` | `/request-cert?template=...` | Подпись CSR (требует `X-API-Key`) | 6 |
+
+## Источники
+* RFC 5280 — Internet X.509 Public Key Infrastructure Certificate and CRL Profile
+* RFC 6960 — X.509 Internet Public Key Infrastructure Online Certificate Status Protocol (OCSP)
+* RFC 2986 — PKCS #10: Certification Request Syntax
+* pyca/cryptography — Python cryptographic library
+* FastAPI — HTTP framework
+* CA/Browser Forum Baseline Requirements
